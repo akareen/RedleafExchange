@@ -53,10 +53,13 @@ class Trade:
     taker_order_id: int
     taker_party_id: int
     maker_is_buyer: bool
+    maker_quantity_remaining: int = 0
+    taker_quantity_remaining: int = 0
 
     def __str__(self) -> str:  # For logging and debugging
         return (f"Trade(instrument_id={self.instrument_id}, price_cents={self.price_cents}, "
                 f"quantity={self.quantity}, timestamp={self.timestamp}, "
                 f"maker_order_id={self.maker_order_id}, maker_party_id={self.maker_party_id}, "
                 f"taker_order_id={self.taker_order_id}, taker_party_id={self.taker_party_id}, "
-                f"maker_is_buyer={self.maker_is_buyer})")
+                f"maker_is_buyer={self.maker_is_buyer}, maker_quantity_remaining={self.maker_quantity_remaining}, "
+                f"taker_quantity_remaining={self.taker_quantity_remaining})")

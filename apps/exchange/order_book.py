@@ -83,7 +83,7 @@ class OrderBook:
         elif order.order_type is OrderType.GTC:
             trades += self._match_limit(order)
             if order.quantity:                 # residue rests
-                self._rest_order(order)
+                self.rest_order(order)
         elif order.order_type is OrderType.IOC:
             trades += self._match_limit(order)
             if order.quantity:                 # unfilled part cancelled
@@ -118,10 +118,13 @@ class OrderBook:
             level_dict.pop(order.price_cents, None)
             heap.mark_empty(order.price_cents)
 
+        if first_time:
+            del self.oid_map[order_id]
+
         return first_time
 
     # ---------- internal helpers ----------------------------------------
-    def _rest_order(self, o: Order) -> None:
+    def rest_order(self, o: Order) -> None:
         lvl_dict = self.bids if o.side is Side.BUY else self.asks
         heap     = self.bid_heap if o.side is Side.BUY else self.ask_heap
 
@@ -203,9 +206,11 @@ class OrderBook:
             taker_order_id=order.order_id,  # incoming order
             maker_party_id=top_order.party_id,
             taker_party_id=order.party_id,
-            maker_is_buyer=(top_order.side is Side.BUY)
+            maker_is_buyer=(top_order.side is Side.BUY),
+            maker_quantity_remaining=top_order.quantity,
+            taker_quantity_remaining=order.quantity
         )
-        if top_order.quantity == 0:
+        if top_order.quantity == 0 and top_order.order_id in self.oid_map:
             self.cancel(top_order.order_id)  # remove from book if fully filled
         return trade
 

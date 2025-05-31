@@ -11,7 +11,11 @@ from apps.exchange.models import Order, Trade, Side, OrderType
 from apps.exchange.composite_writer import CompositeWriter
 
 # ───────────────────── request DTOs ───────────────────────────────────
-class NewOrderReq(BaseModel):
+class _AuthMixin(BaseModel):
+    party_id: int  = Field(gt=0)
+    password: str  = Field(min_length=1)
+
+class NewOrderReq(_AuthMixin):
     instrument_id: int
     side: Side | str
     order_type: OrderType | str
@@ -47,7 +51,7 @@ class NewOrderReq(BaseModel):
         return m
 
 
-class CancelReq(BaseModel):
+class CancelReq(_AuthMixin):
     instrument_id: int
     order_id: int
 
@@ -74,13 +78,29 @@ class Exchange:
             self.log.warning("validation error: %s", e)
             return {"status": "ERROR", "details": e.errors()}
 
-        book  = self._get_book(req.instrument_id)
+        book = self._books.get(req.instrument_id)
+        if not book:
+            self.log.warning("new-order unknown instrument %s", req.instrument_id)
+            return {"status": "ERROR", "details": "unknown instrument"}
+
         order = self._build_order(req)
         trades: List[Trade] = book.submit(order)
+        if (order.order_type is OrderType.GTC or order.order_type is OrderType.LIMIT) and order.quantity > 0 and order.cancelled == False:
+            self._writer.upsert_live_order(order)
 
         self._writer.record_order(order)
-        for t in trades:
-            self._writer.record_trade(t)
+        for trade in trades:
+            self._writer.record_trade(trade)
+            if trade.maker_quantity_remaining == 0:
+                self._writer.remove_live_order(
+                    inst=order.instrument_id,
+                    order_id=trade.maker_order_id
+                )
+            if trade.taker_quantity_remaining == 0:
+                self._writer.remove_live_order(
+                    inst=order.instrument_id,
+                    order_id=trade.taker_order_id
+                )
 
         self.log.info("ACCEPT  oid=%s qty_rem=%s trades=%d",
                  order.order_id, order.quantity, len(trades))
@@ -106,6 +126,10 @@ class Exchange:
 
         if book.cancel(req.order_id):
             self._writer.record_cancel(req.instrument_id, req.order_id)
+            self._writer.remove_live_order(
+                inst=req.instrument_id,
+                order_id=req.order_id
+            )
             self.log.info("CANCELLED oid=%s", req.order_id)
             return {"status": "CANCELLED", "order_id": req.order_id}
 
@@ -124,12 +148,6 @@ class Exchange:
         return {"status": "CREATED", "instrument_id": instrument_id}
 
     # ───────────── internal helpers ───────────────────────────────────
-    def _get_book(self, instr: int) -> OrderBook:
-        book = self._books.get(instr)
-        if book is None:
-            raise ValueError(f"unknown instrument {instr}")
-        return book
-
     def _build_order(self, req: NewOrderReq) -> Order:
         oid = self._next_oid
         self._next_oid += 1
@@ -155,6 +173,8 @@ class Exchange:
 
             count_rows = 0
             for row in row_iter:
+                if row["cancelled"] or row["quantity"] <= 0:
+                    continue
                 order = Order(
                     order_type=OrderType[row["order_type"]],
                     side=Side[row["side"]],
@@ -166,7 +186,7 @@ class Exchange:
                     party_id=row["party_id"],
                     cancelled=row["cancelled"],
                 )
-                book.submit(order)
+                book.rest_order(order)
                 self._next_oid = max(self._next_oid, row["order_id"] + 1)
                 count_rows += 1
 

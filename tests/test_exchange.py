@@ -1,189 +1,231 @@
-# tests/test_exchange_full.py
 from __future__ import annotations
-import unittest, itertools
+import unittest, random
+from typing import Dict, List, Tuple
+from dataclasses import asdict
 from time import time_ns
-from typing import List, Dict
 
-from apps.exchange.exchange import Exchange
-from apps.exchange.models   import OrderType, Side
+from fastapi import FastAPI, Body, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.testclient import TestClient
+
+from tests.conftest import PWD
 
 
-# ─────────────────── MockWriter helper ───────────────────────────────
-class MockWriter:
-    """
-    • list_instruments   – returns preset instrument ids
-    • iter_orders        – yields dict rows in timestamp order
-    • record_* methods   – just log to self.calls list
-    • create_instrument  – logs creation request
-    """
+# ───────────── DummyWriter ───────────────────────────────────────────
+class DummyWriter:
     def __init__(self):
-        # preload: instrument 1 with two resting orders    (bid & ask)
-        self._orders: Dict[int, List[dict]] = {
-            1: [
-                {
-                    "order_id":    1,
-                    "order_type":  "GTC",
-                    "side":        "BUY",
-                    "price_cents": 10000,
-                    "quantity":    5,
-                    "timestamp":   time_ns(),
-                    "party_id":    11,
-                    "cancelled":   False,
-                },
-                {
-                    "order_id":    2,
-                    "order_type":  "GTC",
-                    "side":        "SELL",
-                    "price_cents": 10050,
-                    "quantity":    7,
-                    "timestamp":   time_ns(),
-                    "party_id":    12,
-                    "cancelled":   False,
-                },
-            ]
-        }
-        self.calls: List[tuple[str, tuple, dict]] = []  # fn_name, args, kwargs
+        self.orders:  List[dict] = []
+        self.trades:  List[dict] = []
+        self.cancels: List[Tuple[int, int]] = []
+        self.created: List[int]  = []
+        self._orders_by_instr: Dict[int, List[dict]] = {}
 
     # ---- rebuild helpers -------------------------------------------
-    def list_instruments(self) -> list[int]:
-        self.calls.append(("list_instruments", (), {}))
-        return list(self._orders.keys())
+    def list_instruments(self): return list(self._orders_by_instr.keys())
+    def iter_orders(self, i):   return self._orders_by_instr.get(i, [])
+    def create_instrument(self, i): self.created.append(i); self._orders_by_instr.setdefault(i, [])
 
-    def iter_orders(self, instrument_id: int):
-        self.calls.append(("iter_orders", (instrument_id,), {}))
-        for row in self._orders[instrument_id]:
-            yield row
+    # ---- live persist ----------------------------------------------
+    def record_order (self, o): self.orders.append(asdict(o))
+    def record_trade (self, t): self.trades.append(asdict(t))
+    def record_cancel(self, i, oid): self.cancels.append((i, oid))
 
-    # ---- live-time persistence -------------------------------------
-    def record_order(self, order):
-        self.calls.append(("record_order", (order,), {}))
+    # ---- live-order (new) ---------------------------------------------
+    def upsert_live_order(self, order):  # called when a resting order is accepted
+        pass
 
-    def record_trade(self, trade):
-        self.calls.append(("record_trade", (trade,), {}))
-
-    def record_cancel(self, instrument_id: int, order_id: int):
-        self.calls.append(("record_cancel", (instrument_id, order_id), {}))
-
-    # ---- new instrument --------------------------------------------
-    def create_instrument(self, instrument_id: int):
-        self.calls.append(("create_instrument", (instrument_id,), {}))
-        self._orders[instrument_id] = []
+    def remove_live_order(self, inst: int, order_id: int):  # called on fill / cancel
+        pass
 
 
-# ─────────────────── Test-suite ──────────────────────────────────────
-class ExchangeFullSuite(unittest.TestCase):
+# ───────────── helper: in-memory FastAPI + Exchange ------------------
+def make_client() -> tuple[TestClient, DummyWriter]:
+    from apps.exchange.exchange         import Exchange
+    from apps.exchange.composite_writer import CompositeWriter
+
+    dummy = DummyWriter()
+    ex = Exchange(CompositeWriter(dummy))          # no DB/auth layer
+
+    app = FastAPI()
+
+    @app.post("/orders")
+    def _orders(p: dict = Body(...)):
+        out = ex.handle_new_order(p)
+        if out.get("status") == "ERROR":
+            raise HTTPException(status_code=422, detail=jsonable_encoder(out["details"]))
+        return out
+
+    @app.post("/cancel")
+    def _cancel(p: dict = Body(...)):
+        return ex.handle_cancel(p)
+
+    @app.post("/new_book")
+    def _new_book(p: dict = Body(...)):
+        return ex.create_order_book(p["instrument_id"])
+
+    return TestClient(app), dummy
+
+
+# ───────────── Integration tests ─────────────────────────────────────
+class APIFullIntegration(unittest.TestCase):
+
     def setUp(self):
-        self.writer = MockWriter()
-        self.ex = Exchange(self.writer)          # triggers rebuild
+        self.client, self.w = make_client()
 
-    # ---------- rebuild verified ------------------------------------
-    def test_rebuild_called(self):
-        self.assertIn(
-            ("list_instruments", (), {}), self.writer.calls, "list_instruments not invoked"
-        )
-        self.assertIn(("iter_orders", (1,), {}), self.writer.calls)
-        # Best bid/ask reflect rebuilt book
-        book = self.ex._books[1]
-        self.assertEqual(book.best_bid(), 10000)
-        self.assertEqual(book.best_ask(), 10050)
-
-    # ---------- new order path --------------------------------------
-    def test_handle_new_order_gtc(self):
-        payload = {
-            "instrument_id": 1,
-            "side": "BUY",
-            "order_type": "GTC",
-            "price_cents": 10020,
-            "quantity": 3,
-            "party_id": 77,
-        }
-        resp = self.ex.handle_new_order(payload)
-        self.assertEqual(resp["status"], "ACCEPTED")
-        # writer should receive exactly one order persist
-        recs = [c for c in self.writer.calls if c[0] == "record_order"]
-        self.assertTrue(recs and recs[-1][1][0].price_cents == 10020)
-
-    # ---------- market order produces trade + writer trade call -----
-    def test_market_trade_flow(self):
-        payload = {
-            "instrument_id": 1,
-            "side": "BUY",
-            "order_type": "MARKET",
-            "quantity": 4,
-            "party_id": 55,
-        }
-        resp = self.ex.handle_new_order(payload)
-        self.assertEqual(resp["trades"][0]["price_cents"], 10050)
-        # record_trade must be called
-        self.assertTrue(any(c[0] == "record_trade" for c in self.writer.calls))
-
-    # ---------- IOC residue cancelled automatically -----------------
-    def test_ioc_residue_cancelled(self):
-        payload = {
-            "instrument_id": 1,
-            "side": "BUY",
-            "order_type": "IOC",
-            "price_cents": 9950,
-            "quantity": 10,
-            "party_id": 88,
-        }
-        resp = self.ex.handle_new_order(payload)
-        self.assertTrue(resp["cancelled"])
-        # no trade because bid < best ask
-        self.assertEqual(resp["trades"], [])
-
-    # ---------- cancel happy path -----------------------------------
-    def test_cancel_success(self):
-        # cancel the ask rebuilt earlier (id=2)
-        resp = self.ex.handle_cancel({"instrument_id": 1, "order_id": 2})
-        self.assertEqual(resp["status"], "CANCELLED")
-        self.assertTrue(
-            any(c[0] == "record_cancel" and c[1][1] == 2 for c in self.writer.calls)
-        )
-
-    # ---------- cancel duplicate / miss -----------------------------
-    def test_cancel_miss(self):
-        self.ex.handle_cancel({"instrument_id": 1, "order_id": 2})  # first time
-        resp = self.ex.handle_cancel({"instrument_id": 1, "order_id": 2})
-        self.assertEqual(resp["status"], "ERROR")
-
-    # ---------- validation errors -----------------------------------
-    def test_validation_fail(self):
-        bad = {
-            "instrument_id": 1,
-            "side": "BUY",
-            "order_type": "GTC",
-            # price missing
-            "quantity": 1,
-            "party_id": 99,
-        }
-        resp = self.ex.handle_new_order(bad)
-        self.assertEqual(resp["status"], "ERROR")
-
-    # ---------- dynamic book creation -------------------------------
-    def test_create_new_book(self):
-        out = self.ex.create_order_book(7)
-        self.assertEqual(out, {"status": "CREATED", "instrument_id": 7})
-        self.assertIn(7, self.ex._books)
-        self.assertIn(("create_instrument", (7,), {}), self.writer.calls)
-
-        # inserting into new book works
-        payload = {
-            "instrument_id": 7,
-            "side": "SELL",
-            "order_type": "GTC",
-            "price_cents": 11000,
-            "quantity": 2,
-            "party_id": 66,
-        }
-        r = self.ex.handle_new_order(payload)
-        self.assertEqual(r["status"], "ACCEPTED")
-
-    # ---------- new book duplicate id -------------------------------
-    def test_create_duplicate_book(self):
-        self.ex.create_order_book(9)
-        dup = self.ex.create_order_book(9)
+    # ----- /new_book -------------------------------------------------
+    def test_new_book_and_duplicate(self):
+        self.assertEqual(self.client.post("/new_book", json={"instrument_id": 10}).status_code, 200)
+        dup = self.client.post("/new_book", json={"instrument_id": 10}).json()
         self.assertEqual(dup["status"], "ERROR")
+
+    # ----- GTC life-cycle -------------------------------------------
+    def test_gtc_limit_lifecycle(self):
+        self.client.post("/new_book", json={"instrument_id": 1})
+
+        ask = dict(instrument_id=1, side="SELL", order_type="GTC",
+                   price_cents=10500, quantity=5, party_id=1, password=PWD)
+        ask_id = self.client.post("/orders", json=ask).json()["order_id"]
+
+        bid = dict(instrument_id=1, side="BUY", order_type="GTC",
+                   price_cents=11000, quantity=3, party_id=2, password=PWD)
+        trades = self.client.post("/orders", json=bid).json()["trades"]
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["quantity"], 3)
+
+        cancel = dict(instrument_id=1, order_id=ask_id,
+                      party_id=99, password=PWD)
+        self.assertEqual(self.client.post("/cancel", json=cancel).json()["status"], "CANCELLED")
+
+    # ----- MARKET sweep multi-level ---------------------------------
+    def test_market_sweep_multi_level(self):
+        self.client.post("/new_book", json={"instrument_id": 2})
+        for px, qty in [(10000, 1), (10005, 2), (10010, 3)]:
+            self.client.post("/orders", json=dict(
+                instrument_id=2, side="SELL", order_type="GTC",
+                price_cents=px, quantity=qty, party_id=9, password=PWD))
+
+        mkt = dict(instrument_id=2, side="BUY", order_type="MARKET",
+                   quantity=4, party_id=77, password=PWD)
+        r = self.client.post("/orders", json=mkt).json()
+        self.assertEqual(r["remaining_qty"], 0)
+        self.assertEqual(sum(t["quantity"] for t in r["trades"]), 4)
+
+    # ----- MARKET on empty book -------------------------------------
+    def test_market_on_empty_book(self):
+        self.client.post("/new_book", json={"instrument_id": 3})
+        r = self.client.post("/orders", json=dict(
+            instrument_id=3, side="BUY", order_type="MARKET",
+            quantity=2, party_id=5, password=PWD)).json()
+        self.assertEqual(r["trades"], [])
+        self.assertEqual(r["remaining_qty"], 2)
+
+    # ----- IOC outside spread ---------------------------------------
+    def test_ioc_full_cancel(self):
+        self.client.post("/new_book", json={"instrument_id": 4})
+        self.client.post("/orders", json=dict(
+            instrument_id=4, side="SELL", order_type="GTC",
+            price_cents=10200, quantity=1, party_id=8, password=PWD))
+        r = self.client.post("/orders", json=dict(
+            instrument_id=4, side="BUY", order_type="IOC",
+            price_cents=9900, quantity=1, party_id=9, password=PWD)).json()
+        self.assertTrue(r["cancelled"] is True)
+
+    # ----- Validation errors ----------------------------------------
+    def test_validation_errors(self):
+        bads = [
+            dict(instrument_id=5, side="BUY", order_type="GTC", quantity=1,
+                 party_id=1, password=PWD),                         # price missing
+            dict(instrument_id=5, side="XXX", order_type="MARKET", quantity=1,
+                 party_id=1, password=PWD),                         # bad side
+            dict(instrument_id=5, side="BUY", order_type="FOO", quantity=1,
+                 party_id=1, password=PWD),                         # bad order_type
+        ]
+        for b in bads:
+            with self.subTest(b=b):
+                self.assertEqual(self.client.post("/orders", json=b).status_code, 422)
+
+    # ----- cancel edge cases ----------------------------------------
+    def test_cancel_edge_cases(self):
+        self.client.post("/new_book", json={"instrument_id": 6})
+        place = self.client.post("/orders", json=dict(
+            instrument_id=6, side="SELL", order_type="GTC",
+            price_cents=9999, quantity=1, party_id=44, password=PWD)).json()
+        oid = place["order_id"]
+
+        ok = dict(instrument_id=6, order_id=oid, party_id=1, password=PWD)
+        self.assertEqual(self.client.post("/cancel", json=ok).json()["status"], "CANCELLED")
+        self.assertEqual(self.client.post("/cancel", json=ok).json()["status"], "ERROR")
+
+    # ----- OID monotonicity -----------------------------------------
+    def test_oid_monotonicity(self):
+        self.client.post("/new_book", json={"instrument_id": 7})
+        oids = []
+        for i in range(5):
+            r = self.client.post("/orders", json=dict(
+                instrument_id=7, side="BUY", order_type="GTC",
+                price_cents=7000+i, quantity=1, party_id=2, password=PWD)).json()
+            oids.append(r["order_id"])
+        self.assertEqual(oids, sorted(oids))
+
+    # ----- rebuild + live orders ------------------------------------
+    def test_rebuild_then_live_orders(self):
+        # SELL 2 + SELL 3 resting
+        self.w._orders_by_instr[9] = [
+            dict(order_type="GTC", side="SELL", price_cents=5000,
+                 quantity=2, timestamp=time_ns(), order_id=101,
+                 party_id=3, cancelled=False, instrument_id=9),
+            dict(order_type="GTC", side="SELL", price_cents=5050,
+                 quantity=3, timestamp=time_ns(), order_id=102,
+                 party_id=4, cancelled=False, instrument_id=9),
+        ]
+        from apps.exchange.exchange import Exchange
+        from apps.exchange.composite_writer import CompositeWriter
+
+        ex2 = Exchange(CompositeWriter(self.w))
+        app2 = FastAPI()
+        @app2.post("/orders")
+        def _o(p: dict = Body(...)): return ex2.handle_new_order(p)
+
+        c2 = TestClient(app2)
+        mkt = dict(instrument_id=9, side="BUY", order_type="MARKET",
+                   quantity=10, party_id=99, password=PWD)
+        res = c2.post("/orders", json=mkt).json()
+        self.assertEqual(sum(t["quantity"] for t in res["trades"]), 5)
+        self.assertEqual(res["remaining_qty"], 5)
+
+    # ----- high-volume fuzz -----------------------------------------
+    def test_high_volume_fuzz(self):
+        self.client.post("/new_book", json={"instrument_id": 10})
+        oids: List[int] = []
+        for _ in range(200):
+            side = random.choice(["BUY", "SELL"])
+            px   = random.randint(9000, 11000)
+            qty  = random.randint(1, 3)
+            r = self.client.post("/orders", json=dict(
+                instrument_id=10, side=side, order_type="GTC",
+                price_cents=px, quantity=qty,
+                party_id=random.randint(1, 5), password=PWD)).json()
+            if "order_id" in r: oids.append(r["order_id"])
+            if "order_id" in r and random.random() < 0.3:
+                self.client.post("/cancel", json=dict(
+                    instrument_id=10, order_id=r["order_id"],
+                    party_id=1, password=PWD))
+
+        # 50 market pokes
+        for _ in range(50):
+            side = random.choice(["BUY", "SELL"])
+            self.assertIn("remaining_qty", self.client.post(
+                "/orders", json=dict(instrument_id=10, side=side,
+                order_type="MARKET", quantity=random.randint(1,5),
+                party_id=99, password=PWD)).json())
+
+        self.assertEqual(len(set(oids)), len(oids))
+
+    # ----- cancel on missing book -----------------------------------
+    def test_cancel_missing_book(self):
+        bad = dict(instrument_id=123, order_id=1, party_id=1, password=PWD)
+        j = self.client.post("/cancel", json=bad).json()
+        self.assertEqual(j["status"], "ERROR")
 
 
 if __name__ == "__main__":
