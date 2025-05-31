@@ -59,7 +59,7 @@ class PriceHeap:
 class OrderBook:
     def __init__(self, instrument_id: int):
         self.instrument_id = instrument_id
-        self.log  = logging.getLogger(f"OrderBook{instrument_id}")
+        self.log = logging.getLogger("OrderBook")
         self.bids: Dict[int, PriceLevel] = {}
         self.asks: Dict[int, PriceLevel] = {}
         self.bid_heap = PriceHeap(is_bid=True)

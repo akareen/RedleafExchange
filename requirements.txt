@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-dotenv
+pydantic>=2
+motor             # async MongoDB
+httpx
