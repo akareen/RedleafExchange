@@ -1,4 +1,4 @@
-# apps/exchange/book.py
+# apps/exchange/order_book.py
 from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
@@ -65,7 +65,7 @@ class OrderBook:
         self.bid_heap = PriceHeap(is_bid=True)
         self.ask_heap = PriceHeap(is_bid=False)
         self.oid_map: Dict[int, Order] = {}
-        self.log.info("OrderBook created")
+        self.log.debug("OrderBook created")
 
     # ---------- public ---------------------------------------------------
     def submit(self, order: Order) -> List[Trade]:
@@ -74,6 +74,9 @@ class OrderBook:
         • GTC     →  match then rest
         • IOC     →  match; cancel residue
         """
+        if order.instrument_id != self.instrument_id:
+            raise ValueError("Order sent to wrong book")
+
         trades: List[Trade] = []
         if order.order_type is OrderType.MARKET:
             trades += self._execute_market(order)
@@ -84,26 +87,38 @@ class OrderBook:
         elif order.order_type is OrderType.IOC:
             trades += self._match_limit(order)
             if order.quantity:                 # unfilled part cancelled
-                order.cancelled = True
+                order.cancel()
         return trades
 
     def cancel(self, order_id: int) -> bool:
+        """
+        Idempotent cancel.
+
+        Returns
+        -------
+        True   – the order was open and is now newly cancelled
+        False  – the order was either unknown or had already been cancelled/filled
+                 (book/heap cleanup is still performed).
+        """
         order = self.oid_map.get(order_id)
-        if not order or order.cancelled:  # already gone / unknown
+        if order is None:
             self.log.debug("cancel miss %s", order_id)
-            return False
+            return False  # unknown ID
 
-        order.cancel()
-        self.log.debug("cancel ok %s", order_id)
+        first_time = not order.cancelled
+        if first_time:
+            order.cancel()
+            self.log.debug("cancel flag %s", order_id)
 
+        # Always do the data-structure cleanup
         level_dict = self.bids if order.side is Side.BUY else self.asks
         heap = self.bid_heap if order.side is Side.BUY else self.ask_heap
         pl = level_dict.get(order.price_cents)
-
-        if pl and pl.is_empty():
-            del level_dict[order.price_cents]
+        if pl is None or pl.is_empty():
+            level_dict.pop(order.price_cents, None)
             heap.mark_empty(order.price_cents)
-        return True
+
+        return first_time
 
     # ---------- internal helpers ----------------------------------------
     def _rest_order(self, o: Order) -> None:
@@ -120,32 +135,30 @@ class OrderBook:
         trades: List[Trade] = []
         while o.quantity:
             best_price = (self.ask_heap.best() if o.side is Side.BUY else self.bid_heap.best())
-            self.log.info("match_limit: %s %s @ %s", o.side, o.quantity, best_price)
+            self.log.debug("match_limit: %s %s @ %s", o.side, o.quantity, best_price)
 
             if best_price is None:
-                self.log.info("match_limit: no best price found")
+                self.log.debug("match_limit: no best price found")
                 break
             if (o.side is Side.BUY and best_price > o.price_cents) or \
                (o.side is Side.SELL and best_price < o.price_cents):
-                self.log.info("match_limit: no match at %s", best_price)
+                self.log.debug("match_limit: no match at %s", best_price)
                 break
 
             lvl = (self.asks if o.side is Side.BUY else self.bids)[best_price]
             top = lvl.top()
             if top is None:
-                self.log.info("match_limit: no top order at %s", best_price)
-                continue
-            self.log.info("match_limit: top order %s", top)
-
-            trade = self._match_orders(order=o, top_order=top)
-            trades.append(trade)
-            if top.quantity == 0:
-                self.cancel(top.order_id)
                 if lvl.is_empty():
                     del (self.asks if o.side is Side.BUY else self.bids)[best_price]
                     (self.ask_heap if o.side is Side.BUY else self.bid_heap).mark_empty(best_price)
-            self.log.info("trade executed: %s", trade)
-        self.log.info("match_limit: completed with %d trades", len(trades))
+                self.log.debug("match_limit: no top order at %s", best_price)
+                continue
+
+            self.log.debug("match_limit: top order %s", top)
+            trade = self._match_orders(order=o, top_order=top)
+            trades.append(trade)
+            self.log.debug("trade executed: %s", trade)
+        self.log.debug("match_limit: completed with %d trades", len(trades))
         return trades
 
     def _execute_market(self, o: Order) -> List[Trade]:
@@ -160,19 +173,17 @@ class OrderBook:
             lvl = (self.asks if o.side is Side.BUY else self.bids)[best_price]
             top = lvl.top()
             if top is None:
-                self.log.info("execute_market: no top order at %s", best_price)
-                continue
-
-            self.log.info("execute_market: top order %s", top)
-            trade = self._match_orders(order=o, top_order=top)
-            trades.append(trade)
-            if top.quantity == 0:
-                self.cancel(top.order_id)
                 if lvl.is_empty():
                     del (self.asks if o.side is Side.BUY else self.bids)[best_price]
                     (self.ask_heap if o.side is Side.BUY else self.bid_heap).mark_empty(best_price)
-            self.log.info("trade executed %s", trade)
-        self.log.info("execute_market: completed with %d trades", len(trades))
+                self.log.debug("execute_market: no top order at %s", best_price)
+                continue
+
+            self.log.debug("execute_market: top order %s", top)
+            trade = self._match_orders(order=o, top_order=top)
+            trades.append(trade)
+            self.log.debug("trade executed %s", trade)
+        self.log.debug("execute_market: completed with %d trades", len(trades))
         return trades
 
     def _match_orders(self, order: Order, top_order: Order) -> Trade:
@@ -190,8 +201,12 @@ class OrderBook:
             timestamp=time_ns(),
             maker_order_id=top_order.order_id,  # resting book order
             taker_order_id=order.order_id,  # incoming order
+            maker_party_id=top_order.party_id,
+            taker_party_id=order.party_id,
             maker_is_buyer=(top_order.side is Side.BUY)
         )
+        if top_order.quantity == 0:
+            self.cancel(top_order.order_id)  # remove from book if fully filled
         return trade
 
     def best_bid(self): return self.bid_heap.best()
