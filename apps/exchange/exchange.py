@@ -85,34 +85,23 @@ class Exchange:
         order = self._build_order(req)
         trades: List[Trade] = book.submit(order)
         # update the orders with their new amounts from the trades
-
         if (order.order_type is OrderType.GTC) and order.remaining_quantity > 0 and order.cancelled == False:
             self._writer.upsert_live_order(order)
 
         self._writer.record_order(order)
         for trade in trades:
-            self._writer.update_order_quantity(
-                instrument_id=trade.instrument_id,
-                order_id=trade.maker_order_id,
-                quantity_modification=trade.quantity,
-            )
-            self._writer.update_order_quantity(
-                instrument_id=trade.instrument_id,
-                order_id=trade.taker_order_id,
-                quantity_modification=-trade.quantity,
-            )
-
             self._writer.record_trade(trade)
-            if trade.maker_quantity_remaining == 0:
-                self._writer.remove_live_order(
-                    inst=order.instrument_id,
-                    order_id=trade.maker_order_id
+            for oid, qty_rem in [(trade.maker_order_id, trade.maker_quantity_remaining),(trade.taker_order_id, trade.taker_quantity_remaining)]:
+                self._writer.update_order_quantity(
+                    instrument_id=trade.instrument_id,
+                    order_id=oid,
+                    quantity_modification=trade.quantity,
                 )
-            if trade.taker_quantity_remaining == 0:
-                self._writer.remove_live_order(
-                    inst=order.instrument_id,
-                    order_id=trade.taker_order_id
-                )
+                if qty_rem == 0:
+                    self._writer.remove_live_order(
+                        inst=order.instrument_id,
+                        order_id=oid
+                    )
 
         self.log.info("ACCEPT  oid=%s qty_rem=%s trades=%d",
                  order.order_id, order.remaining_quantity, len(trades))

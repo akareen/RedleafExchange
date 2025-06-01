@@ -13,7 +13,7 @@ def main():
     if settings.mongo_user:
         uri = (
             f"mongodb://{settings.mongo_user}:{settings.mongo_pass}"
-            f"@{settings.mongo_host}:{settings.mongo_port}/{settings.mongo_db}"
+            f"@{settings.mongo_host}:{settings.mongo_port}/{settings.mongo_db}?authSource=admin"
         )
     else:
         uri = f"mongodb://{settings.mongo_host}:{settings.mongo_port}/{settings.mongo_db}"

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     mcast_group: str = Field("224.1.1.1", env="MCAST_GROUP")
     mcast_port:  int = Field(4444,        env="MCAST_PORT")
 
+    admin_id: int = Field(1, env="ADMIN_ID")
+    admin_password: str = Field("admin", env="ADMIN_PASSWORD")
+
     class Config:
         env_file = ".env"
 
