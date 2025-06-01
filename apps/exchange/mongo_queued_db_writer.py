@@ -31,7 +31,7 @@ class QueuedDbWriter:
     def __init__(self):
         # — synchronous client for rebuild()
         self._sync_client = MongoClient(_admin_uri())
-        self._sync_db = self._sync_client[SET.mongo_db]
+        self.sync_db = self._sync_client[SET.mongo_db]
 
         # — motor client for background writes
         self._async_client = AsyncIOMotorClient(_admin_uri())
@@ -47,7 +47,7 @@ class QueuedDbWriter:
         Return a list of all instrument‐IDs for which we have an 'orders_<instr>' collection.
         Uses synchronous pymongo, so no asyncio.run→ never conflicts with FastAPI's loop.
         """
-        coll_names = self._sync_db.list_collection_names()
+        coll_names = self.sync_db.list_collection_names()
         inst_ids: List[int] = []
         for name in coll_names:
             if name.startswith("orders_"):
@@ -62,36 +62,30 @@ class QueuedDbWriter:
         Stream all existing orders_{instrument_id}, sorted by timestamp ascending.
         Uses synchronous pymongo, so it's a normal blocking call.
         """
-        coll = self._sync_db[f"orders_{instrument_id}"]
+        coll = self.sync_db[f"orders_{instrument_id}"]
         cursor = coll.find({}, {"_id": 0}).sort("timestamp", 1)
         return list(cursor)  # each document already has no "_id"
 
     def create_instrument(self, instrument_id: str) -> None:
-        """
-        Create two collections named:
-          - f"orders_{instrument_id}"
-          - f"live_orders_{instrument_id}"
-        in the background, but don’t error if they already exist.
-        """
         orders_coll = f"orders_{instrument_id}"
         live_coll = f"live_orders_{instrument_id}"
         trades_coll = f"trades_{instrument_id}"
 
         async def _ensure_collections():
             try:
-                await self._sync_db.create_collection(orders_coll)
+                await self.sync_db.create_collection(orders_coll)
             except CollectionInvalid:
                 # already existed, ignore
                 pass
 
             try:
-                await self._sync_db.create_collection(live_coll)
+                await self.sync_db.create_collection(live_coll)
             except CollectionInvalid:
                 # already existed, ignore
                 pass
 
             try:
-                await self._sync_db.create_collection(trades_coll)
+                await self.sync_db.create_collection(trades_coll)
             except CollectionInvalid:
                 # already existed, ignore
                 pass

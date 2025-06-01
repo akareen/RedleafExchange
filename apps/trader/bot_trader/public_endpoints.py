@@ -180,15 +180,23 @@ class ExchangeClient:
             raise ExchangeClientError(message)
 
     def create_order_book(
-        self,
-        instrument_id: int,
-        *,
-        admin_party_id: Optional[int] = None,
-        admin_password: Optional[str] = None,
+            self,
+            instrument_id: int,
+            instrument_name: Optional[str] = None,
+            instrument_description: Optional[str] = None,
+            admin_party_id: Optional[int] = None,
+            admin_password: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new order book (instrument) via POST /new_book.
         Must supply admin credentials—defaults to `config.default_*`.
+
+        Arguments:
+            instrument_id: int - Unique ID for the instrument
+            instrument_name: str - Optional name for the instrument
+            instrument_description: str - Optional description for the instrument
+            admin_party_id: int - Admin party ID (defaults to config)
+            admin_password: str - Admin password (defaults to config)
 
         Returns:
             The parsed JSON response, e.g. {"status":"CREATED", "instrument_id": ...}
@@ -201,6 +209,13 @@ class ExchangeClient:
             "party_id": admin_party_id if admin_party_id is not None else self._config.default_party_id,
             "password": admin_password if admin_password is not None else self._config.default_password,
         }
+
+        # Add optional parameters if provided
+        if instrument_name is not None:
+            payload["instrument_name"] = instrument_name
+        if instrument_description is not None:
+            payload["instrument_description"] = instrument_description
+
         logger.info("POST %s → payload: %s", url, payload)
         try:
             resp = self._session.post(url, json=payload, timeout=10.0)

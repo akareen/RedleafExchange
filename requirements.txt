@@ -9,3 +9,7 @@ requests~=2.31.0
 bcrypt~=4.3.0
 pymongo~=4.13.0
 PyMsgBox~=1.0.9
+pandas~=2.2.3
+plotly~=6.1.2
+dash-bootstrap-components~=2.0.3
+dash~=3.0.4
