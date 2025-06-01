@@ -16,24 +16,25 @@ Layout:
 └────────────────────────────────────────────────────────────────────────┘
 
 ┌────────────────────────────────────────────────────────────────────────┐
-│ Order Book (50 vh, left)                      │ Price Chart (40 vh)  │
-│ – scrollable table with Bid/Price/Ask levels  └───────────────────────┘
-│ – (fills two “grid rows” worth of height)                         │
-└───────────────────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────────────────────┐
-│ Recent Trades (30 vh, scrollable)       │ Positions (25 vh, scrollable) │
+│ Order Book (min 50vh, left)                    │ Price Chart (min 50vh) │
+│ – scrollable table with Bid/Price/Ask levels     └───────────────────────┘
 └────────────────────────────────────────────────────────────────────────┘
 
 ┌────────────────────────────────────────────────────────────────────────┐
-│ Open Orders (Me) Card, total 30 vh:                                         │
-│   – Input row (Party ID / Pwd / Fetch) → 5 vh                                │
-│   – Scrollable table (25 vh)                                                 │
-└────────────────────────────────────────────────────────────────────────────┘
+│ Recent Trades (min 50vh, scrollable)            │ Open Orders (Me)       │
+│                                                │ – Input (min 10vh)     │
+│                                                │ – Table (min 30vh)     │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│ Positions (Everyone) – min 50vh (full width)                            │
+│   Columns: Party | NetQty | NetValue | FirstTradeTime | LastTradeTime  │
+│            | AveragePrice                                           │
+└────────────────────────────────────────────────────────────────────────┘
 
 Place a **favicon.ico** under `./assets/` so Dash serves it.
 
-Run with:
+Run:
     python exchange_dash_app.py
 """
 import os
@@ -59,12 +60,12 @@ REFRESH_MS   = 500                 # UI refresh interval (ms)
 MAX_TRADES   = 800                # Keep last N trades in memory
 
 # Heights (viewport units):
-BOOK_H         = "50vh"           # Order Book
-PRICE_CH_H     = "40vh"           # Price Chart
-TRADES_H       = "30vh"           # Recent Trades
-POS_H          = "25vh"           # Positions (Everyone)
-OPEN_INPUT_H   = "5vh"            # “Open Orders (Me)” input row
-OPEN_TABLE_H   = "25vh"           # “Open Orders (Me)” scrollable table
+BOOK_H         = "50vh"           # Order Book (minimum)
+PRICE_CH_H     = "50vh"           # Price Chart (minimum)
+TRADES_H       = "50vh"           # Recent Trades (minimum)
+OPEN_INPUT_H   = "10vh"           # Open Orders input row (minimum)
+OPEN_TABLE_H   = "30vh"           # Open Orders scrollable table (minimum)
+POS_H          = "50vh"           # Positions (Everyone) (minimum)
 
 # Colors / fonts:
 BG           = "#1f2124"           # Soft dark‐gray background
@@ -197,7 +198,7 @@ app = dash.Dash(
     suppress_callback_exceptions=True
 )
 
-# Custom favicon (place `favicon.ico` in ./assets/)
+# Custom favicon (place favicon.ico in ./assets/)
 app.index_string = f"""
 <!DOCTYPE html>
 <html>
@@ -209,7 +210,12 @@ app.index_string = f"""
 {{%css%}}
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;500&display=swap" rel="stylesheet">
 <style>
-  body {{ background:{BG}; color:{ORANGE_TXT}; font-family:{FONT_FAMILY}; }}
+  html, body {{
+      margin:0; padding:0;
+      background:{BG};
+      color:{ORANGE_TXT};
+      font-family:{FONT_FAMILY};
+  }}
   .bg-dark   {{ background:{BG} !important; }}
   .text-light{{ color:{ORANGE_TXT} !important; }}
   ::-webkit-scrollbar {{
@@ -306,6 +312,7 @@ def book_to_rows(bid_dict_raw, ask_dict_raw):
         {"name": "Price" , "id": "Price"},
         {"name": "AskQty", "id": "AskQty"},
     ]
+    # Alignments for the three columns:
     styles.append({"if": {"column_id": "BidQty"}, "textAlign": "left"})
     styles.append({"if": {"column_id": "Price"},  "textAlign": "center"})
     styles.append({"if": {"column_id": "AskQty"}, "textAlign": "right"})
@@ -317,11 +324,19 @@ def compute_positions(trades):
     """
     For each party:
       • NetQty = (sum of buys) – (sum of sells)
-      • LastTradeTime = timestamp of their last trade
-      • AveragePrice = (abs(total dollar value) / abs(NetQty))
-    Returns rows: [ { "Party", "NetQty", "LastTradeTime", "AveragePrice" }, ... ]
+      • NetValue = signed dollar‐value of net position
+      • FirstTradeTime = timestamp of earliest trade
+      • LastTradeTime  = timestamp of latest trade
+      • AveragePrice = abs(NetValue)/abs(NetQty)
+    Returns rows: [ { "Party", "NetQty", "NetValue", "FirstTradeTime",
+                      "LastTradeTime", "AveragePrice" }, ... ]
     """
-    pos_map = defaultdict(lambda: {"qty": 0, "value_cents": 0, "last_ts": None})
+    pos_map = defaultdict(lambda: {
+        "qty": 0,
+        "value_cents": 0,
+        "first_ts": None,
+        "last_ts": None
+    })
     for t in trades:
         maker = int(t["maker_party_id"])
         taker = int(t["taker_party_id"])
@@ -329,7 +344,15 @@ def compute_positions(trades):
         px    = int(t["price_cents"])
         ts    = t["timestamp"]
 
-        # Maker side
+        # Update first/last timestamps for both maker and taker
+        for pid in (maker, taker):
+            rec = pos_map[pid]
+            if rec["first_ts"] is None or ts < rec["first_ts"]:
+                rec["first_ts"] = ts
+            if rec["last_ts"] is None or ts > rec["last_ts"]:
+                rec["last_ts"] = ts
+
+        # Maker side:
         if t["maker_is_buyer"]:
             pos_map[maker]["qty"] += qty
             pos_map[maker]["value_cents"] += px * qty
@@ -337,7 +360,7 @@ def compute_positions(trades):
             pos_map[maker]["qty"] -= qty
             pos_map[maker]["value_cents"] -= px * qty
 
-        # Taker side (opposite of maker)
+        # Taker side (opposite):
         if t["maker_is_buyer"]:
             pos_map[taker]["qty"] -= qty
             pos_map[taker]["value_cents"] -= px * qty
@@ -345,23 +368,21 @@ def compute_positions(trades):
             pos_map[taker]["qty"] += qty
             pos_map[taker]["value_cents"] += px * qty
 
-        for pid in (maker, taker):
-            rec = pos_map[pid]
-            if rec["last_ts"] is None or ts > rec["last_ts"]:
-                rec["last_ts"] = ts
-
     rows = []
     for pid, rec in pos_map.items():
         net_qty = rec["qty"]
+        net_val_dollars = rec["value_cents"] / 100
         if net_qty == 0:
             avg_price = 0.0
         else:
             avg_price = abs(rec["value_cents"]) / abs(net_qty) / 100
         rows.append({
-            "Party"         : _parties.get(pid, str(pid)),
-            "NetQty"        : net_qty,
-            "LastTradeTime" : format_dt(rec["last_ts"]),
-            "AveragePrice"  : f"{avg_price:,.2f}",
+            "Party"          : _parties.get(pid, str(pid)),
+            "NetQty"         : net_qty,
+            "NetValue"       : f"{net_val_dollars:,.2f}",
+            "FirstTradeTime" : format_dt(rec["first_ts"]),
+            "LastTradeTime"  : format_dt(rec["last_ts"]),
+            "AveragePrice"   : f"{avg_price:,.2f}",
         })
     # Sort descending by absolute net quantity
     rows.sort(key=lambda r: abs(r["NetQty"]), reverse=True)
@@ -370,7 +391,7 @@ def compute_positions(trades):
 
 def build_table(title, tbl_id, parent_height):
     """
-    Returns a dbc.Card that is exactly parent_height tall,
+    Returns a dbc.Card that is at least parent_height tall,
     whose DataTable flex‐fills the remainder beneath a 2rem header.
     Column headers are center-aligned, and the table is forced to scroll if too many rows.
     """
@@ -418,7 +439,7 @@ def build_table(title, tbl_id, parent_height):
         style={
             "backgroundColor": BG,
             "border": "none",
-            "height": parent_height,
+            "minHeight": parent_height,  # ← use minHeight instead of fixed height
             "display": "flex",
             "flexDirection": "column",
         },
@@ -479,52 +500,59 @@ app.layout = dbc.Container(
 
         html.Small(id="lbl-msg", className="mb-2", style={"color": ORANGE_TXT, "fontSize": "0.8rem"}),
 
-        # ── Row: Order Book (50vh) on Left, Price Chart (40vh) + Recent Trades (30vh) on Right ─────
+        # ── Row1: Order Book (min 50vh) on Left, Price Chart (min 50vh) on Right ───
         dbc.Row(
             [
-                # Left: Order Book = 50vh
+                # Left: Order Book
                 dbc.Col(
                     html.Div(
                         build_table("Order Book (prices in cents)", "tbl-book", "100%"),
-                        style={"height": BOOK_H}
+                        style={"minHeight": BOOK_H}
                     ),
                     width=6
                 ),
-                # Right: Price Chart (40vh) above Recent Trades (30vh)
+
+                # Right: Price Chart (min 50vh)
                 dbc.Col(
-                    [
-                        # Price Chart (40vh)
-                        html.Div(
-                            dbc.Card(
-                                [
-                                    dbc.CardHeader(
-                                        html.Span("Price Chart", style={"fontWeight": "900", "color": ORANGE_TXT}),
-                                        className="bg-dark text-light p-1",
-                                        style={"height": "2rem", "lineHeight": "2rem"}
-                                    ),
-                                    dcc.Graph(id="fig-price", style={"height": "100%"}),
-                                ],
-                                className="shadow mb-2",
-                                style={"backgroundColor": BG, "border": "none", "height": PRICE_CH_H},
-                            ),
-                            style={"marginBottom": "0.5rem"}
+                    html.Div(
+                        dbc.Card(
+                            [
+                                dbc.CardHeader(
+                                    html.Span("Price Chart", style={"fontWeight":"900", "color":ORANGE_TXT}),
+                                    className="bg-dark text-light p-1",
+                                    style={"height":"2rem", "lineHeight":"2rem"}
+                                ),
+                                # This div is where the Graph will be injected:
+                                html.Div(id="fig-price-container", style={"height":"calc(100% - 2rem)"})
+                            ],
+                            className="shadow mb-2",
+                            style={
+                                "backgroundColor": BG,
+                                "border": "none",
+                                "minHeight": PRICE_CH_H
+                            },
                         ),
-                        # Recent Trades (30vh, scrollable)
-                        html.Div(
-                            build_table("Recent Trades", "tbl-trades", "100%"),
-                            style={"height": TRADES_H}
-                        ),
-                    ],
+                        style={"marginBottom":"0.5rem"}
+                    ),
                     width=6
                 ),
             ],
             className="gx-2 mb-2",
         ),
 
-        # ── Row: Open Orders (Me) on Left (input + table), Positions (Everyone) on Right ─
+        # ── Row2: Recent Trades (min 50vh) on Left, Open Orders (Me) (min 50vh) on Right ──
         dbc.Row(
             [
-                # Left: Open Orders (Me)
+                # Left: Recent Trades
+                dbc.Col(
+                    html.Div(
+                        build_table("Recent Trades", "tbl-trades", "100%"),
+                        style={"minHeight": TRADES_H}
+                    ),
+                    width=6
+                ),
+
+                # Right: Open Orders (Me) (min 50vh total)
                 dbc.Col(
                     html.Div(
                         [
@@ -537,7 +565,7 @@ app.layout = dbc.Container(
                                         className="bg-dark text-light p-1",
                                         style={"height": "2rem", "lineHeight": "2rem"}
                                     ),
-                                    # Input area (5vh)
+                                    # Input area (min 10vh)
                                     html.Div(
                                         dbc.Row(
                                             [
@@ -547,15 +575,15 @@ app.layout = dbc.Container(
                                                 html.Div(id="open-msg", style={"color": ORANGE_TXT, "fontSize": "0.75rem"}),
                                             ],
                                             className="gx-1",
-                                            style={"height": OPEN_INPUT_H, "padding": "0.25rem"}
+                                            style={"minHeight": OPEN_INPUT_H, "padding": "0.25rem"}
                                         ),
-                                        style={"height": OPEN_INPUT_H}
+                                        style={"minHeight": OPEN_INPUT_H}
                                     ),
-                                    # Table area (25vh, scrollable)
+                                    # Table area (min 30vh, scrollable, but can grow)
                                     html.Div(
                                         id="open-orders-table",
                                         style={
-                                            "height": OPEN_TABLE_H,
+                                            "minHeight": OPEN_TABLE_H,
                                             "overflowY": "auto",
                                             "padding": "0.25rem"
                                         }
@@ -567,20 +595,27 @@ app.layout = dbc.Container(
                                     "border": "none",
                                     "display": "flex",
                                     "flexDirection": "column",
+                                    "minHeight": "100%"
                                 },
                             )
                         ],
+                        style={"minHeight": TRADES_H}  # same as Recent Trades
                     ),
                     width=6
                 ),
+            ],
+            className="gx-2 mb-2",
+        ),
 
-                # Right: Positions (Everyone) – 25vh scrollable
+        # ── Row3: Positions (Everyone) – min 50vh full width ────────────────
+        dbc.Row(
+            [
                 dbc.Col(
                     html.Div(
                         build_table("Positions (Everyone)", "tbl-pos", "100%"),
-                        style={"height": POS_H}
+                        style={"minHeight": POS_H}
                     ),
-                    width=6
+                    width=12
                 ),
             ],
             className="gx-2 mb-2",
@@ -593,7 +628,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-open-raw"),
     ],
     fluid=True,
-    className="pt-2",
+    className="p-2",
 )
 
 
@@ -676,22 +711,23 @@ def render_book(book_data):
     return rows, cols, styles
 
 
-# 4) Render Recent Trades & Price Chart
+# 4) Render Recent Trades & inject Price Chart
 @app.callback(
     Output("tbl-trades", "data"),
     Output("tbl-trades", "columns"),
-    Output("fig-price", "figure"),
+    Output("fig-price-container", "children"),
     Input("store-trades", "data"),
 )
 def render_trades_and_chart(trades_data):
-    rows = []
+    # Build Recent Trades rows
+    trade_rows = []
     xs, ys = [], []
     for t in trades_data[-MAX_TRADES:]:
         ts_str = format_dt(t["timestamp"])
         px    = int(t["price_cents"])
         qty   = int(t["quantity"])
         total = (px * qty) / 100  # in dollars
-        rows.append({
+        trade_rows.append({
             "Time"  : ts_str,
             "Price" : no_dollar(px),
             "Qty"   : qty,
@@ -711,6 +747,7 @@ def render_trades_and_chart(trades_data):
         {"name": "Taker", "id": "Taker"},
     ]
 
+    # Build Price Chart
     fig = go.Figure()
     if xs and ys:
         fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Price", line=dict(color=LASTP_TXT)))
@@ -733,7 +770,13 @@ def render_trades_and_chart(trades_data):
         font=dict(family=FONT_FAMILY, color=ORANGE_TXT),
     )
 
-    return rows, trade_cols, fig
+    # Inject the Graph into the <div id="fig-price-container">
+    graph_div = html.Div(
+        dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height": "100%"}),
+        style={"height": "100%"}
+    )
+
+    return trade_rows, trade_cols, graph_div
 
 
 # 5) Fetch “Open Orders (Me)” on button click
@@ -776,21 +819,21 @@ def render_open_table(open_rows):
         return html.Div("No open orders or not fetched yet.", style={"color": ORANGE_TXT, "fontSize": "0.75rem"})
     # Build an HTML table manually so we can embed a Button in each row
     header = html.Tr([
-        html.Th("OID", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Side", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("OID",   style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Side",  style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
         html.Th("Price", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Qty", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Action", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Qty",   style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Action",style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
     ])
     rows = []
     for r in open_rows:
         oid = r["OID"]
         rows.append(
             html.Tr([
-                html.Td(oid, style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
-                html.Td(r["Side"], style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
+                html.Td(oid,   style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
+                html.Td(r["Side"],  style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
                 html.Td(r["Price"], style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
-                html.Td(r["Qty"], style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
+                html.Td(r["Qty"],   style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
                 html.Td(
                     dbc.Button(
                         "Cancel",
@@ -928,10 +971,12 @@ def send_new_order(n_gtc, n_ioc, inst_id, pid, pwd, qty, price_txt, side):
 def render_positions(trades_data):
     rows = compute_positions(trades_data)
     cols = [
-        {"name": "Party"         , "id": "Party"},
-        {"name": "NetQty"        , "id": "NetQty"},
-        {"name": "LastTradeTime" , "id": "LastTradeTime"},
-        {"name": "AveragePrice"  , "id": "AveragePrice"},
+        {"name": "Party"          , "id": "Party"},
+        {"name": "NetQty"         , "id": "NetQty"},
+        {"name": "NetValue"       , "id": "NetValue"},
+        {"name": "FirstTradeTime" , "id": "FirstTradeTime"},
+        {"name": "LastTradeTime"  , "id": "LastTradeTime"},
+        {"name": "AveragePrice"   , "id": "AveragePrice"},
     ]
     return rows, cols
 
@@ -939,4 +984,3 @@ def render_positions(trades_data):
 # ────────── Run the Dash app ───────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("DASH_PORT", "8050")), debug=True)
-
