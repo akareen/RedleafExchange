@@ -1,5 +1,6 @@
 # apps/exchange/multicast_writer.py
 import json, socket
+from dataclasses import asdict
 from apps.exchange.settings import get_settings
 SET = get_settings()
 
@@ -25,3 +26,14 @@ class MulticastWriter:
 
     def create_instrument(self, instr):  # called on POST /new_book
         pass
+
+    def upsert_live_order(self, order):
+        # no‐op for multicast (we don’t store live orders there)
+        return None
+
+    def remove_live_order(self, inst, order_id):
+        # no‐op for multicast (we don’t store live orders there)
+        return None
+
+    def update_order_quantity(self, instrument_id: int, order_id: int, quantity_modification: int) -> None:
+        return None

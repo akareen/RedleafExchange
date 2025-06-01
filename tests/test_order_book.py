@@ -28,6 +28,8 @@ def fresh_order(
         order_id=OID,
         party_id=random.randint(1, 9),
         cancelled=False,
+        filled_quantity=0,
+        remaining_quantity=qty,
     )
 
 
@@ -86,7 +88,7 @@ class OrderBookHeavyTests(unittest.TestCase):
         self.assertEqual(self.book.best_ask(), 10010)
         # remaining qty on 10010 should now be 1
         lvl = self.book.asks[10010]
-        self.assertEqual(lvl.top().quantity, 1)
+        self.assertEqual(lvl.top().remaining_quantity, 1)
 
     # ------------------------------------------------------------------
     # Cancel unknown & cancel twice
@@ -141,7 +143,7 @@ class OrderBookHeavyTests(unittest.TestCase):
 
         # invariant: all orders in oid_map with qty==0 must be cancelled flag, others >0 & !cancelled
         for o in self.book.oid_map.values():
-            if o.quantity == 0:
+            if o.remaining_quantity == 0:
                 self.assertTrue(o.cancelled)
             else:
                 self.assertFalse(o.cancelled)

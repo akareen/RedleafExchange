@@ -40,11 +40,11 @@ class DummyWriter:
     # ---- live persist ----------------------------------------------
     def record_order(self, o):
         # Save the order's __dict__ for inspection
-        self.orders.append(asdict(o))
+        self.orders.append(o.__dict__)
 
     def record_trade(self, t):
         # Save the trade's __dict__ for inspection
-        self.trades.append(asdict(t))
+        self.trades.append(t.__dict__)
 
     def record_cancel(self, instr: int, oid: int):
         # Record (instrument_id, order_id) pairs
@@ -54,10 +54,10 @@ class DummyWriter:
         bucket = self._orders_by_instr.setdefault(order.instrument_id, [])
         for i, row in enumerate(bucket):
             if row.get("order_id") == order.order_id:
-                bucket[i] = asdict(order)
+                bucket[i] = order.__dict__
                 break
         else:
-            bucket.append(asdict(order))
+            bucket.append(order.__dict__)
 
     def remove_live_order(self, inst: int, order_id: int):
         rows = self._orders_by_instr.get(inst, [])
@@ -374,7 +374,7 @@ class APIFullIntegration(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         trades = data.get("trades", [])
-        total_matched = sum(t["quantity"] for t in trades)
+        total_matched = sum(t["remaining_quantity"] for t in trades)
         self.assertEqual(total_matched, 5)   # (2+3)
         self.assertEqual(data.get("remaining_qty"), 5)
 

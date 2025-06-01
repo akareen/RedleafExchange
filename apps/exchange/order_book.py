@@ -18,7 +18,7 @@ class PriceLevel:
         self.queue.append(o)
 
     def _prune(self) -> None:
-        while self.queue and (self.queue[0].quantity == 0 or self.queue[0].cancelled):
+        while self.queue and (self.queue[0].remaining_quantity == 0 or self.queue[0].cancelled):
             self.queue.popleft()
 
     def top(self) -> Optional[Order]:
@@ -82,11 +82,11 @@ class OrderBook:
             trades += self._execute_market(order)
         elif order.order_type is OrderType.GTC:
             trades += self._match_limit(order)
-            if order.quantity:                 # residue rests
+            if order.remaining_quantity:                 # residue rests
                 self.rest_order(order)
         elif order.order_type is OrderType.IOC:
             trades += self._match_limit(order)
-            if order.quantity:                 # unfilled part cancelled
+            if order.remaining_quantity:                 # unfilled part cancelled
                 order.cancel()
         return trades
 
@@ -136,9 +136,9 @@ class OrderBook:
 
     def _match_limit(self, o: Order) -> List[Trade]:
         trades: List[Trade] = []
-        while o.quantity:
+        while o.remaining_quantity:
             best_price = (self.ask_heap.best() if o.side is Side.BUY else self.bid_heap.best())
-            self.log.debug("match_limit: %s %s @ %s", o.side, o.quantity, best_price)
+            self.log.debug("match_limit: %s %s @ %s", o.side, o.remaining_quantity, best_price)
 
             if best_price is None:
                 self.log.debug("match_limit: no best price found")
@@ -169,7 +169,7 @@ class OrderBook:
         MARKET: identical to limit matching but no price check.
         """
         trades: List[Trade] = []
-        while o.quantity:
+        while o.remaining_quantity:
             best_price = (self.ask_heap.best() if o.side is Side.BUY
                           else self.bid_heap.best())
             if best_price is None: break
@@ -194,7 +194,7 @@ class OrderBook:
         Match an incoming order with the top order in the book.
         Returns a Trade object.
         """
-        qty = min(order.quantity, top_order.quantity)
+        qty = min(order.remaining_quantity, top_order.remaining_quantity)
         order.fill(quantity=qty)
         top_order.fill(quantity=qty)
         trade = Trade(
@@ -207,10 +207,10 @@ class OrderBook:
             maker_party_id=top_order.party_id,
             taker_party_id=order.party_id,
             maker_is_buyer=(top_order.side is Side.BUY),
-            maker_quantity_remaining=top_order.quantity,
-            taker_quantity_remaining=order.quantity
+            maker_quantity_remaining=top_order.remaining_quantity,
+            taker_quantity_remaining=order.remaining_quantity
         )
-        if top_order.quantity == 0 and top_order.order_id in self.oid_map:
+        if top_order.remaining_quantity == 0 and top_order.order_id in self.oid_map:
             self.cancel(top_order.order_id)  # remove from book if fully filled
         return trade
 

@@ -1,46 +1,69 @@
-from fastapi import FastAPI, Body, Request, HTTPException, status, Depends
-
+# apps/exchange/api.py
+from fastapi import FastAPI, Depends
 from utils.logging import setup as setup_logging
 from apps.exchange.exchange import Exchange
 from apps.exchange.composite_writer import CompositeWriter
-from apps.exchange.mongo_async_writer import MongoAsyncWriter
+from apps.exchange.mongo_queued_db_writer import QueuedDbWriter
 from apps.exchange.multicast_writer import MulticastWriter
-from apps.exchange.mongo_party_auth import MongoPartyAuth
+from apps.exchange.text_backup_writer import TextBackupWriter
+from apps.exchange.mongo_party_auth import Auth
+
+from apps.exchange.settings import get_settings
+
+SET = get_settings()
+print("→ Loaded Settings:", SET.mongo_user, SET.mongo_pass, SET.mongo_db)
 
 setup_logging()
 
-# writers ----------------------------------------------------------------
-writer = CompositeWriter(MulticastWriter(), MongoAsyncWriter())
-ex      = Exchange(writer)
+# Instantiate the composite writer and exchange
+multicast_writer = MulticastWriter()
+queued_db_writer = QueuedDbWriter()
+text_backup  = TextBackupWriter(directory="text_backup")
+writer = CompositeWriter(
+    multicast_writer,
+    queued_db_writer,
+    text_backup
+)
+ex     = Exchange(writer)
+
 app = FastAPI()
 
-# ---------- common auth (all endpoints) ------------------------------
-async def require_auth(request: Request, payload: dict = Body(...)):
-    pid = payload.get("party_id")
-    pwd = payload.get("password", "")
-    if not await MongoPartyAuth.verify(pid, pwd):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="invalid party_id / password")
-    request.state.party = await MongoPartyAuth.get(pid)     # pass whole record
-    return payload                                          # Route receives it
+# Two “flavors” of Auth dependency: normal vs. admin
+AuthCommon = Auth(require_admin=False)
+AuthAdmin  = Auth(require_admin=True)
 
-# ---------- stricter auth for admin-only end-points ------------------
-async def require_admin(payload: dict = Depends(require_auth),
-                        request: Request = None):
-    if not request.state.party.get("is_admin"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="admin privileges required")
-    return payload
 
-# ----------- routes ---------------------------------------------------
+@app.on_event("startup")
+async def load_exchange_state():
+    # On startup, read any existing orders from Mongo into in‐memory books
+    await ex.rebuild_from_database()
+    await queued_db_writer.startup()
+
+
 @app.post("/orders")
-def new_order(payload: dict = Depends(require_auth)):
-    return ex.handle_new_order(payload)               # unchanged
+async def new_order(
+    payload: dict = Depends(AuthCommon),
+):
+    # `payload` is the JSON body after AuthCommon verified party_id/password
+    # You can still do `party_doc = request.state.party` if needed, but here we only need payload.
+    return ex.handle_new_order(payload)
+
 
 @app.post("/cancel")
-def cancel(payload: dict = Depends(require_auth)):
+async def cancel(
+    payload: dict = Depends(AuthCommon),
+):
     return ex.handle_cancel(payload)
 
+
 @app.post("/new_book")
-def new_book(payload: dict = Depends(require_admin)):
+async def new_book(
+    payload: dict = Depends(AuthAdmin),
+):
     return ex.create_order_book(payload["instrument_id"])
+
+@app.on_event("shutdown")
+async def unload_exchange_state():
+    # Ensure we cleanly shut down the queued writer
+    await queued_db_writer.shutdown()
+    print("Exchange API shutdown complete.")

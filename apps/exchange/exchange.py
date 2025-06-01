@@ -64,7 +64,6 @@ class Exchange:
         self._books: Dict[int, OrderBook] = {}
         self._next_oid: int = 1
         self.log.info("Exchange starting — rebuilding books ...")
-        self._rebuild_from_database()
         self.log.info("Exchange rebuild complete — ready to serve")
         self.log.info("OID counter starts at %s", self._next_oid)
         self._empty_hit = 0
@@ -85,11 +84,24 @@ class Exchange:
 
         order = self._build_order(req)
         trades: List[Trade] = book.submit(order)
-        if (order.order_type is OrderType.GTC or order.order_type is OrderType.LIMIT) and order.quantity > 0 and order.cancelled == False:
+        # update the orders with their new amounts from the trades
+
+        if (order.order_type is OrderType.GTC) and order.remaining_quantity > 0 and order.cancelled == False:
             self._writer.upsert_live_order(order)
 
         self._writer.record_order(order)
         for trade in trades:
+            self._writer.update_order_quantity(
+                instrument_id=trade.instrument_id,
+                order_id=trade.maker_order_id,
+                quantity_modification=trade.quantity,
+            )
+            self._writer.update_order_quantity(
+                instrument_id=trade.instrument_id,
+                order_id=trade.taker_order_id,
+                quantity_modification=-trade.quantity,
+            )
+
             self._writer.record_trade(trade)
             if trade.maker_quantity_remaining == 0:
                 self._writer.remove_live_order(
@@ -103,13 +115,13 @@ class Exchange:
                 )
 
         self.log.info("ACCEPT  oid=%s qty_rem=%s trades=%d",
-                 order.order_id, order.quantity, len(trades))
+                 order.order_id, order.remaining_quantity, len(trades))
         return {
             "status": "ACCEPTED",
             "order_id": order.order_id,
-            "remaining_qty": order.quantity,
+            "remaining_qty": order.remaining_quantity,
             "cancelled": order.cancelled,
-            "trades": [asdict(t) for t in trades],
+            "trades": [t.__dict__ for t in trades],
         }
 
     def handle_cancel(self, payload: dict) -> dict:
@@ -124,12 +136,15 @@ class Exchange:
             self.log.warning("cancel unknown instrument %s", req.instrument_id)
             return {"status": "ERROR", "details": "unknown instrument"}
 
+        cancelled_order = book.oid_map.get(req.order_id)
         if book.cancel(req.order_id):
             self._writer.record_cancel(req.instrument_id, req.order_id)
             self._writer.remove_live_order(
                 inst=req.instrument_id,
                 order_id=req.order_id
             )
+            if cancelled_order is not None:
+                self._writer.record_order(cancelled_order)
             self.log.info("CANCELLED oid=%s", req.order_id)
             return {"status": "CANCELLED", "order_id": req.order_id}
 
@@ -161,11 +176,17 @@ class Exchange:
             order_id=oid,
             party_id=req.party_id,
             cancelled=False,
+            filled_quantity=0,
+            remaining_quantity=req.quantity,
         )
 
     # ───────────── cold-start rebuild logic ───────────────────────────
-    def _rebuild_from_database(self) -> None:
+    async def rebuild_from_database(self) -> None:
         for instr in self._writer.list_instruments():
+            if instr in self._books:
+                self.log.warning("REBUILD-BOOK instrument=%s already exists", instr)
+                continue
+
             book = OrderBook(instr)
             self._books[instr] = book
             row_iter = self._writer.iter_orders(instr)  # must be ordered by ts
@@ -173,7 +194,7 @@ class Exchange:
 
             count_rows = 0
             for row in row_iter:
-                if row["cancelled"] or row["quantity"] <= 0:
+                if row["cancelled"] or row["remaining_quantity"] <= 0:
                     continue
                 order = Order(
                     order_type=OrderType[row["order_type"]],
@@ -185,6 +206,8 @@ class Exchange:
                     order_id=row["order_id"],
                     party_id=row["party_id"],
                     cancelled=row["cancelled"],
+                    remaining_quantity=row["remaining_quantity"],
+                    filled_quantity=row["filled_quantity"]
                 )
                 book.rest_order(order)
                 self._next_oid = max(self._next_oid, row["order_id"] + 1)

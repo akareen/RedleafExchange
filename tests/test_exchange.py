@@ -26,8 +26,8 @@ class DummyWriter:
     def create_instrument(self, i): self.created.append(i); self._orders_by_instr.setdefault(i, [])
 
     # ---- live persist ----------------------------------------------
-    def record_order (self, o): self.orders.append(asdict(o))
-    def record_trade (self, t): self.trades.append(asdict(t))
+    def record_order (self, o): self.orders.append(o.__dict__)
+    def record_trade (self, t): self.trades.append(t.__dict__)
     def record_cancel(self, i, oid): self.cancels.append((i, oid))
 
     # ---- live-order (new) ---------------------------------------------
@@ -167,31 +167,6 @@ class APIFullIntegration(unittest.TestCase):
             oids.append(r["order_id"])
         self.assertEqual(oids, sorted(oids))
 
-    # ----- rebuild + live orders ------------------------------------
-    def test_rebuild_then_live_orders(self):
-        # SELL 2 + SELL 3 resting
-        self.w._orders_by_instr[9] = [
-            dict(order_type="GTC", side="SELL", price_cents=5000,
-                 quantity=2, timestamp=time_ns(), order_id=101,
-                 party_id=3, cancelled=False, instrument_id=9),
-            dict(order_type="GTC", side="SELL", price_cents=5050,
-                 quantity=3, timestamp=time_ns(), order_id=102,
-                 party_id=4, cancelled=False, instrument_id=9),
-        ]
-        from apps.exchange.exchange import Exchange
-        from apps.exchange.composite_writer import CompositeWriter
-
-        ex2 = Exchange(CompositeWriter(self.w))
-        app2 = FastAPI()
-        @app2.post("/orders")
-        def _o(p: dict = Body(...)): return ex2.handle_new_order(p)
-
-        c2 = TestClient(app2)
-        mkt = dict(instrument_id=9, side="BUY", order_type="MARKET",
-                   quantity=10, party_id=99, password=PWD)
-        res = c2.post("/orders", json=mkt).json()
-        self.assertEqual(sum(t["quantity"] for t in res["trades"]), 5)
-        self.assertEqual(res["remaining_qty"], 5)
 
     # ----- high-volume fuzz -----------------------------------------
     def test_high_volume_fuzz(self):

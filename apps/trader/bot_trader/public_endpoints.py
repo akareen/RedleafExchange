@@ -3,7 +3,6 @@ import os
 import json
 import logging
 from typing import Optional, Dict, Any
-
 import requests
 from requests import Session, Response, HTTPError, RequestException
 from dotenv import load_dotenv

@@ -1,6 +1,7 @@
 # apps/exchange/settings.py
 from functools import lru_cache
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     mongo_host: str = Field("localhost", env="MONGO_HOST")
