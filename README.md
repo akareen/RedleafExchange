@@ -170,7 +170,7 @@ JSON bodies for authenticated endpoints must include:
 
 ```json
 {
-  "party_id": <int>,
+  "party_id": <str>,
   "password": "<plaintext-password>",
   // … other fields specific to the endpoint …
 }
@@ -195,7 +195,7 @@ Create a new instrument (order book) in memory **and** persist metadata in Mongo
     "instrument_id": 55,
     "instrument_name": "ExampleInstrument",
     "instrument_description": "Optional human-readable description",
-    "party_id": 1,                // admin party ID
+    "party_id": "Adam",                // admin party ID
     "password": "admin_password"
   }
   ```
@@ -235,7 +235,7 @@ Place a new order of type `MARKET`, `GTC`, or `IOC`.
     "order_type": "MARKET" | "GTC" | "IOC",
     "quantity": <positive int>,
     "price_cents": <non-neg int>       // required for GTC / IOC; omit/null for MARKET
-    "party_id": <int>,
+    "party_id": <str>,
     "password": "<password>"
   }
   ```
@@ -277,9 +277,9 @@ Place a new order of type `MARKET`, `GTC`, or `IOC`.
         "quantity": <int>,
         "timestamp": <ns-timestamp>,
         "maker_order_id": <int>,
-        "maker_party_id": <int>,
+        "maker_party_id": <str>,
         "taker_order_id": <int>,
-        "taker_party_id": <int>,
+        "taker_party_id": <str>,
         "maker_is_buyer": <bool>,
         "maker_quantity_remaining": <int>,
         "taker_quantity_remaining": <int>
@@ -312,7 +312,7 @@ Cancel a single open order (idempotent).
   {
     "instrument_id": <int>,
     "order_id": <int>,
-    "party_id": <int>,
+    "party_id": <str>,
     "password": "<password>"
   }
   ```
@@ -357,7 +357,7 @@ Cancel **all** open orders for a particular party on a given instrument.
   ```json
   {
     "instrument_id": <int>,
-    "party_id": <int>,
+    "party_id": <str>,
     "password": "<password>"
   }
   ```
@@ -418,7 +418,7 @@ No authentication required. All return JSON arrays of documents.
       "price_cents": 10000,
       "quantity": 5,
       "timestamp": 1748871516613951000,
-      "party_id": 1,
+      "party_id": "Adam",
       "cancelled": false,
       "filled_quantity": 3,
       "remaining_quantity": 2
@@ -440,7 +440,7 @@ No authentication required. All return JSON arrays of documents.
       "price_cents": 10100,
       "quantity": 3,
       "timestamp": 1748871646869633000,
-      "party_id": 2,
+      "party_id": "Adam",
       "cancelled": false,
       "filled_quantity": 0,
       "remaining_quantity": 3
@@ -460,9 +460,9 @@ No authentication required. All return JSON arrays of documents.
       "quantity": 3,
       "timestamp": 1748871646869633000,
       "maker_order_id": 16,
-      "maker_party_id": 1,
+      "maker_party_id": "Adam",
       "taker_order_id": 17,
-      "taker_party_id": 2,
+      "taker_party_id": "Adam",
       "maker_is_buyer": false,
       "maker_quantity_remaining": 2,
       "taker_quantity_remaining": 0
@@ -472,7 +472,7 @@ No authentication required. All return JSON arrays of documents.
   ```
 
 * **`GET /parties`**
-  Return every party’s friendly name: `[{ "party_id": 12, "party_name": "MegaFund" }, …]`.
+  Return every party’s friendly name: `[{ "party_id": "Adam", "party_name": "MegaFund" }, …]`.
 
 ### Parties (Authentication)
 
@@ -480,7 +480,7 @@ No authentication required. All return JSON arrays of documents.
 
   ```json
   {
-    "party_id": <int>,
+    "party_id": <str>,
     "party_name": "<string>",
     "password": "<bcrypt-hash>",
     "is_admin": <bool>

@@ -51,7 +51,7 @@ class MongoPartyAuth:
         client.close()
 
     @classmethod
-    async def verify(cls, party_id: int, password: str) -> bool:
+    async def verify(cls, party_id: str, password: str) -> bool:
         await cls._load()
 
         stored_hash = cls._cache.get(party_id)
@@ -102,7 +102,7 @@ class MongoPartyAuth:
         return False
 
     @classmethod
-    async def get(cls, party_id: int) -> dict | None:
+    async def get(cls, party_id: str) -> dict | None:
         uri = _build_auth_uri(SET.mongo_db)
         client = AsyncIOMotorClient(uri)
         collection = client[SET.mongo_db]["parties"]

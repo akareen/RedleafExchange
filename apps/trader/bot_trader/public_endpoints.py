@@ -67,7 +67,7 @@ class ExchangeClientConfig:
     def __init__(
         self,
         api_url: Optional[str] = None,
-        default_party_id: Optional[int] = None,
+        default_party_id: Optional[str] = None,
         default_password: Optional[str] = None
     ):
         env_api = os.getenv("API_URL")
@@ -85,7 +85,7 @@ class ExchangeClientConfig:
             self.default_party_id = default_party_id
         elif env_pid:
             try:
-                self.default_party_id = int(env_pid)
+                self.default_party_id = str(env_pid)
             except ValueError:
                 raise ExchangeClientError("PARTY_ID environment variable must be an integer.")
         else:
@@ -184,7 +184,7 @@ class ExchangeClient:
             instrument_id: int,
             instrument_name: Optional[str] = None,
             instrument_description: Optional[str] = None,
-            admin_party_id: Optional[int] = None,
+            admin_party_id: Optional[str] = None,
             admin_password: Optional[str] = None,
     ) -> Dict[str, Any]:
         """

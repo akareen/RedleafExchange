@@ -26,7 +26,7 @@ def main():
 
         for row in reader:
             try:
-                party_id = int(row["party_id"])
+                party_id = str(row["party_id"])
             except (ValueError, KeyError):
                 print(f" Skipping row with invalid or missing party_id: {row}")
                 continue

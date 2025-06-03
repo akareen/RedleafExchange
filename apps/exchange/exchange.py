@@ -16,7 +16,7 @@ from apps.exchange.settings import get_settings, admin_uri
 SET = get_settings()
 
 class _AuthMixin(BaseModel):
-    party_id: int  = Field(gt=0)
+    party_id: str  = Field(gt=0)
     password: str  = Field(min_length=1)
 
 class NewOrderReq(_AuthMixin):
@@ -25,7 +25,7 @@ class NewOrderReq(_AuthMixin):
     order_type: OrderType | str
     price_cents: int | None = Field(None, ge=0)
     quantity: int = Field(gt=0)
-    party_id: int = Field(gt=0)
+    party_id: str = Field(gt=0)
 
     @field_validator("side", mode="before")
     def _cast_side(cls, v):

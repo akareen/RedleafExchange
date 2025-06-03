@@ -215,8 +215,8 @@ def compute_positions(trades):
     })
 
     for t in trades:
-        maker = int(t["maker_party_id"])
-        taker = int(t["taker_party_id"])
+        maker = str(t["maker_party_id"])
+        taker = str(t["taker_party_id"])
         qty   = int(t["quantity"])
         px    = int(t["price_cents"])
         ts    = t["timestamp"]
@@ -890,7 +890,7 @@ def fetch_open_orders(nc, pid, pwd, inst_id):
     except Exception as e:
         return dash.no_update, f"fetch_open_orders: Network Error: {e}"
 
-    mine = [r for r in raw if int(r["party_id"]) == int(pid)]
+    mine = [r for r in raw if str(r["party_id"]) == str(pid)]
     rows = []
     for r in sorted(mine, key=lambda x: x["order_id"]):
         rows.append({
@@ -1049,7 +1049,7 @@ def send_new_order(n_buy, n_sell, inst_id, pid, pwd, qty, price_txt, otype):
         "order_type"   : otype,
         "quantity"     : int(qty),
         "price_cents"  : px_cs,
-        "party_id"     : int(pid),
+        "party_id"     : str(pid),
         "password"     : pwd,
     }
     try:

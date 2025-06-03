@@ -21,7 +21,7 @@ class Order:
     quantity: int
     timestamp: int
     order_id: int
-    party_id: int
+    party_id: str
     cancelled: bool
     filled_quantity: int
     remaining_quantity: int
@@ -73,9 +73,9 @@ class Trade:
     quantity: int
     timestamp: int
     maker_order_id: int
-    maker_party_id: int
+    maker_party_id: str
     taker_order_id: int
-    taker_party_id: int
+    taker_party_id: str
     maker_is_buyer: bool
     maker_quantity_remaining: int = 0
     taker_quantity_remaining: int = 0
