@@ -6,47 +6,24 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from typing import Any, Dict, List, Tuple
 
 from apps.exchange.models import Order, Trade
-from apps.exchange.settings import get_settings
+from apps.exchange.settings import get_settings, admin_uri
 
 SET = get_settings()
 
 
-def _admin_uri() -> str:
-    """
-    Build a URI that connects as the “root” or “admin” user.
-    You must have created an admin user in Mongo with the correct role.
-    """
-    if SET.mongo_user and SET.mongo_pass:
-        return f"mongodb://{SET.mongo_user}:{SET.mongo_pass}@{SET.mongo_host}:{SET.mongo_port}/admin"
-    else:
-        # if no auth is configured, assume localhost without credentials
-        return f"mongodb://{SET.mongo_host}:{SET.mongo_port}/admin"
-
 class QueuedDbWriter:
-    """
-    A drop‐in replacement for MongoAsyncWriter that never blocks the “hot path.”
-    All writes get enqueued; a single background coroutine drains them.
-    Meanwhile, rebuild‐time methods use a separate synchronous PyMongo client.
-    """
     def __init__(self):
-        # — synchronous client for rebuild()
-        self._sync_client = MongoClient(_admin_uri())
+        self._sync_client = MongoClient(admin_uri())
         self.sync_db = self._sync_client[SET.mongo_db]
 
-        # — motor client for background writes
-        self._async_client = AsyncIOMotorClient(_admin_uri())
+        self._async_client = AsyncIOMotorClient(admin_uri())
         self._async_db = self._async_client[SET.mongo_db]
 
-        # queue of (msg_type, payload)
         self._queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
         self._consumer_task: asyncio.Task | None = None
 
     # ───────── rebuild‐time helpers (called by Exchange.rebuild_from_database) ─────
     def list_instruments(self) -> List[int]:
-        """
-        Return a list of all instrument‐IDs for which we have an 'orders_<instr>' collection.
-        Uses synchronous pymongo, so no asyncio.run→ never conflicts with FastAPI's loop.
-        """
         coll_names = self.sync_db.list_collection_names()
         inst_ids: List[int] = []
         for name in coll_names:
@@ -58,10 +35,6 @@ class QueuedDbWriter:
         return inst_ids
 
     def iter_orders(self, instrument_id: int) -> List[Dict[str, Any]]:
-        """
-        Stream all existing orders_{instrument_id}, sorted by timestamp ascending.
-        Uses synchronous pymongo, so it's a normal blocking call.
-        """
         coll = self.sync_db[f"orders_{instrument_id}"]
         cursor = coll.find({}, {"_id": 0}).sort("timestamp", 1)
         return list(cursor)  # each document already has no "_id"
@@ -75,22 +48,18 @@ class QueuedDbWriter:
             try:
                 await self.sync_db.create_collection(orders_coll)
             except CollectionInvalid:
-                # already existed, ignore
                 pass
 
             try:
                 await self.sync_db.create_collection(live_coll)
             except CollectionInvalid:
-                # already existed, ignore
                 pass
 
             try:
                 await self.sync_db.create_collection(trades_coll)
             except CollectionInvalid:
-                # already existed, ignore
                 pass
 
-        # Schedule the task; pass the coroutine directly to create_task.
         asyncio.create_task(_ensure_collections())
 
 
@@ -111,10 +80,6 @@ class QueuedDbWriter:
         self._queue.put_nowait(("REM_LIVE", {"instrument_id": inst, "order_id": order_id}))
 
     def update_order_quantity(self, instrument_id: int, order_id: int, quantity_modification: int) -> None:
-        """
-        Update the quantity of an existing order in the live_orders collection.
-        This is a special case where we modify an existing order's quantity.
-        """
         self._queue.put_nowait(("UPDATE_LIVE", {
             "instrument_id": instrument_id,
             "order_id": order_id,
@@ -181,23 +146,16 @@ class QueuedDbWriter:
                     # unknown message → ignore or log
                     pass
 
-            except Exception:
-                # In production, use a real logger
-                print(f"[QueuedDbWriter] error handling {msg_type} → {payload}")
-
+            except Exception as e:
+                pass
             finally:
                 self._queue.task_done()
 
     async def startup(self) -> None:
-        """Spawn the background consumer (if not already running)."""
         if self._consumer_task is None or self._consumer_task.done():
             self._consumer_task = asyncio.create_task(self._consumer_loop())
 
     async def shutdown(self) -> None:
-        """
-        Flush any remaining writes, then cancel the consumer task.
-        Called on FastAPI shutdown.
-        """
         if self._consumer_task:
             await self._queue.join()
             self._consumer_task.cancel()

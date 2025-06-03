@@ -1,6 +1,5 @@
 # apps/exchange/multicast_writer.py
 import json, socket
-from dataclasses import asdict
 from apps.exchange.settings import get_settings
 SET = get_settings()
 
@@ -13,7 +12,6 @@ class MulticastWriter:
     def _send(self, payload):
         self.sock.sendto(json.dumps(payload, separators=(",", ":")).encode(), self.addr)
 
-    # public API expected by Exchange
     def record_order(self, o):  self._send({"type": "ORDER",  **o.__dict__})
     def record_trade(self, t):  self._send({"type": "TRADE",  **t.__dict__})
     def record_cancel(self, i, oid): self._send({"type": "CANCEL", "instrument_id": i, "order_id": oid})

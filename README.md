@@ -1,4 +1,4 @@
-# 💸 Redleaf Exchange
+# 💸🍁 Redleaf Exchange 🍁💸
 
 <div align="center">
   <img src="https://img.shields.io/github/last-commit/akareen/RedleafExchange">
@@ -7,502 +7,1222 @@
   <img src="https://img.shields.io/github/forks/akareen/RedleafExchange?style=social">
 </div>
 
-![Client Page 1](assets/exchange_client_page_1.png)
-![Client Page 2](assets/exchange_client_page_2.png)
-<br>
+![Client Page](assets/exchange_client_image.png)
 
-A high-performance, real-time order matching engine with REST API, WebSocket dashboard, and client SDK.
+A high-performance, real-time order-matching engine and dashboard built on FastAPI, MongoDB, and Dash. This system provides:
+
+* **A RESTful API** for managing instruments, placing/canceling orders, and querying order/trade histories.
+* **An in-memory OrderBook** that matches Market, GTC (Good-Till-Canceled), and IOC (Immediate-Or-Cancel) orders with price-time priority.
+* **MongoDB persistence** for all orders, live orders, and trades (via a queued background writer).
+* **A Python `ExchangeClient`** wrapper to interact with the API in a clean, exception-safe way.
+* **A Dash-based dashboard** (“Redleaf Exchange Dashboard”) that visualizes order book depth, recent trades, open orders, and party positions in real time.
+
+---
 
 ## Table of Contents
 
-1. [Introduction](#introduction)
-2. [Features](#features)
-3. [Architecture & Structure](#architecture--structure)
-4. [Getting Started](#getting-started)
+1. [Architecture Overview](#architecture-overview)
+2. [API Endpoints](#api-endpoints)
 
-   * [Prerequisites](#prerequisites)
-   * [Installation](#installation)
-   * [Configuration](#configuration)
-5. [Running the API Server](#running-the-api-server)
-6. [Client SDK Usage](#client-sdk-usage)
-7. [Web Dashboard](#web-dashboard)
-8. [Key Components](#key-components)
-
-   * [Order Book](#order-book)
-   * [Exchange Core](#exchange-core)
-   * [Persistence & Writers](#persistence--writers)
    * [Authentication](#authentication)
-   * [Logging](#logging)
-   * [CLI Utilities](#cli-utilities)
-9. [Testing](#testing)
-10. [Contributing](#contributing)
-11. [License](#license)
+   * [Instrument Management](#instrument-management)
+   * [Orders](#orders)
+   * [Cancels](#cancels)
+   * [Queries (Orders / Live Orders / Trades)](#queries-orders--live-orders--trades)
+   * [Parties](#parties)
+3. [ExchangeClient (Python Library)](#exchangeclient-python-library)
+
+   * [Configuration](#configuration)
+   * [Common Operations](#common-operations)
+   * [Error Handling](#error-handling)
+4. [MongoDB Schema & Persistence](#mongodb-schema--persistence)
+
+   * [`instruments` Collection](#instruments-collection)
+   * `orders_<instrument_id>` Collections
+   * `live_orders_<instrument_id>` Collections
+   * `trades_<instrument_id>` Collections
+   * `parties` Collection (Authentication)
+   * [`counters` Collection](#counters-collection)
+5. [Running the Exchange API](#running-the-exchange-api)
+
+   * [Environment Variables](#environment-variables)
+   * [Starting FastAPI](#starting-fastapi)
+   * [Initializing Mongo Collections & Indexes](#initializing-mongo-collections--indexes)
+6. [Dash Dashboard](#dash-dashboard)
+
+   * [Overview](#overview)
+   * [Key Views & Interaction](#key-views--interaction)
+7. [Testing](#testing)
+
+   * [Unit & Integration Tests](#unit--integration-tests)
+   * [End-to-End Tests](#end-to-end-tests)
+8. [Appendix: Example Workflows](#appendix-example-workflows)
 
 ---
 
-## Introduction
+## Architecture Overview
 
-Redleaf Exchange is a fully-featured matching engine built in Python using FastAPI. It supports:
+```
+┌──────────────────────────┐                                  
+│      Dash Dashboard      │                                  
+│  (React / Plotly / CSS)  │                                  
+└────────────┬─────────────┘                                  
+             │ fetch every 500–1000ms                           
+             ▼                                                    
+┌──────────────────────────┐          ┌──────────────────────┐    
+│      FastAPI Server      │◀────────▶│   ExchangeClient     │    
+│  (apps/exchange/api.py)  │   HTTP   │(public_endpoints.py) │    
+└────────────┬─────────────┘          └──────────────────────┘    
+             │ (Invokes)                                      
+             ▼                                                    
+┌──────────────────────────┐                                  
+│        Exchange         │   ┌────────────┐                    
+│    (Order Matching)     │──▶│  Writers:  │                    
+│   (apps/exchange/…)     │   │ • QueuedDb │                    
+└────────────┬─────────────┘   │ • Multicast│                    
+             │                 │ • TextBackup│                   
+             │                 │ • Composite│                    
+             ▼                 └────────────┘                    
+┌──────────────────────────┐                                       
+│       MongoDB + Redis?   │  (Primary persistence & indexing)     
+│  (orders_*, live_orders_*,│                                       
+│     trades_*, instruments)│                                       
+└──────────────────────────┘                                       
+```
 
-* **Limit, Market, IOC Orders** with price-time priority.
-* **Persistent storage** in MongoDB (orders, trades, live orders).
-* **Multicast broadcasting** of real-time events for live dashboards.
-* **Text backups** for CSV logging.
-* **Client SDK** for easy integration.
-* **Dash-based Web UI** for live order book, trades, charts, and positions.
-* **Comprehensive testing** (unit, integration, end-to-end).
+1. **Dash Dashboard (`exchange_dash_app.py`)**
 
-Whether you need a local testbed or a production-grade engine, Redleaf Exchange offers flexibility and performance.
+   * Polls FastAPI endpoints (`/live_orders/{inst}`, `/trades/{inst}`, etc.)
+   * Renders order book depth, price chart (candlesticks or line), recent trades, open orders per party, P\&L/Positions, etc.
+
+2. **FastAPI Server (`apps/exchange/api.py`)**
+
+   * Exposes REST endpoints:
+
+     * `/new_book` (create instrument)
+     * `/orders` (place new order)
+     * `/cancel` (cancel single order)
+     * `/cancel_all` (cancel all open orders for a party on an instrument)
+     * `/instruments`, `/orders/{instrument_id}`, `/live_orders/{instrument_id}`, `/trades/{instrument_id}`, `/parties`
+   * Uses dependency‐injected `Auth` to authenticate/authorize based on `party_id` + `password`.
+
+3. **Exchange Core (`apps/exchange/exchange.py`)**
+
+   * Maintains an in-memory dictionary of `OrderBook` instances, keyed by `instrument_id`.
+   * Each `OrderBook` is a price-time priority book that supports:
+
+     * Market, GTC, IOC orders
+     * Matching logic with partial fills, multi-level sweeps
+     * Idempotent cancels, lazy heap cleanup, and rebuild from persisted state.
+
+4. **Writers**
+
+   * **QueuedDbWriter** (`apps/exchange/mongo_queued_db_writer.py`):
+
+     * Pushes every event (order, trade, cancel, live order upsert/remove, quantity update) onto an `asyncio.Queue`.
+     * A background “consumer” task drains the queue and applies atomic operations (insert, replace, delete, update) to Mongo collections.
+   * **MulticastWriter** (`apps/exchange/multicast_writer.py`):
+
+     * Publishes JSON‐encoded events (order/trade/cancel) over UDP multicast for external consumers.
+   * **TextBackupWriter** (`apps/exchange/text_backup_writer.py`):
+
+     * Appends all events to CSV files (under `text_backup/`), for lightweight archival or debugging.
+   * **CompositeWriter** (`apps/exchange/composite_writer.py`):
+
+     * Wraps multiple writer instances (e.g., QueuedDbWriter, MulticastWriter, TextBackupWriter) and fan out every event call to each.
+
+5. **MongoDB Schema**
+
+   * **`instruments`**: metadata (ID, name, description, created\_time, created\_by).
+   * **`orders_<instr>`**: every order (including cancelled/filled) with fields (`order_id`, `side`, `order_type`, `timestamp`, `price_cents`, `quantity`, `filled_quantity`, `remaining_quantity`, `cancelled`, `party_id`, etc.).
+   * **`live_orders_<instr>`**: only currently open (unfilled, not canceled) orders; indexed by `order_id`.
+   * **`trades_<instr>`**: executed trades, ordered by `timestamp`.
+   * **`parties`**: authentication records (`party_id`, `party_name`, `password_hash`, `is_admin`).
+   * **`counters`**: single document for `{"_id": "order_id", "seq": <int>}` to generate monotonic order IDs.
+
+6. **ExchangeClient (Python)**
+
+   * A higher-level, thread-safe client (`apps/trader/bot_trader/public_endpoints.py`) wrapping all public API calls.
+   * Handles:
+
+     * Reading defaults from environment (`API_URL`, `PARTY_ID`, `PASSWORD`) or explicit overrides.
+     * Raising informative exceptions: `ValidationError` (422), `AuthenticationError` (401/403), `HTTPRequestError` (other HTTP errors), `ExchangeClientError`.
+     * Methods: `create_order_book(...)`, `place_order(...)`, `cancel_order(...)`.
+
+7. **Testing**
+
+   * **Unit tests** for `OrderBook` invariants, edge cases, heap cleanup under high volume.
+   * **FastAPI Integration tests** (with a `DummyWriter`) to assert API behavior (e.g. `/orders`, `/cancel`, `/new_book`).
+   * **End-to-End tests**: spin up the real `ExchangeClient` against a local/CI Mongo instance, verify raw Mongo collections, trade invariants, and no duplicate OIDs.
 
 ---
 
-## Features
+## API Endpoints
 
-* **REST API** with authenticated endpoints for creating instruments, placing/canceling orders, and querying state.
-* **Order Types**: GTC (Good-Til-Cancelled), IOC (Immediate-Or-Cancel), Market.
-* **Price-Time Priority** matching engine with efficient heaps and per-price FIFO queues.
-* **Persistence**: non-blocking MongoDB writes, text CSV backups, and multicast events.
-* **Client Library**: `exchange_client.py` for Python applications, handling JSON, validation, and errors.
-* **Web Dashboard**: Dash app for real-time visualization.
-* **Scripts**: Utilities to populate dummy data, bootstrap DB, and manage parties.
-* **Logging**: Rotating logs every 15 minutes, console and file.
-* **Extensive Tests**: Unit and integration tests ensure correctness under load.
+All endpoints reside under the FastAPI application (`apps/exchange/api.py`) and expect JWT-free JSON bodies. Authentication is performed by verifying `party_id` + `password` against the `parties` collection.
 
----
+### Authentication
 
-## Architecture & Structure
+* **Non-admin endpoints** (`/orders`, `/cancel`, `/cancel_all`) use `Auth(require_admin=False)`.
+* **Admin-only endpoints** (`/new_book`) use `Auth(require_admin=True)`.
 
-```
-RedleafExchange/
-├── apps/exchange/               # Core exchange implementation
-│   ├── api.py                   # FastAPI app: routes, startup/shutdown
-│   ├── exchange.py              # Exchange class: request handling, rebuild
-│   ├── order_book.py            # OrderBook: matching logic, price levels
-│   ├── models.py                # Data classes: Order, Trade, Side, OrderType
-│   ├── composite_writer.py      # Fan-out wrapper for multiple writers
-│   ├── mongo_queued_db_writer.py# Async, non-blocking MongoDB writer
-│   ├── multicast_writer.py      # UDP multicast for real-time events
-│   ├── text_backup_writer.py    # CSV backup writer
-│   ├── mongo_admin.py           # Admin utilities (create users, DBs)
-│   ├── mongo_party_auth.py      # Party authentication via MongoDB (`/parties`)
-│   ├── settings.py              # Configuration via environment variables
-│   └── logging.py               # Logging setup (rotating file, console)
-│
-├── apps/trader/                 # Client SDK and examples
-│   └── bot_trader/public_endpoints.py  # ExchangeClient, config, errors
-│
-├── exchange_dash_app.py         # Dash dashboard implementation
-├── exchange_client.py           # Standalone client library for scripts/apps
-│
-├── scripts/                     # CLI scripts
-│   ├── populate_dummy_test_instrument.py  # Populate a test instrument with orders
-│   ├── bootstrap_db.py                  # Create MongoDB collections & indexes
-│   ├── import_parties.py                # Load `parties.csv` into MongoDB
-│   └── <other utility scripts>.py
-│
-├── tests/                        # Tests (unit, integration, end-to-end)
-│   ├── test_app.py               # API integration tests with DummyWriter
-│   ├── test_order_book_extended.py # Deep OrderBook unit tests
-│   ├── test_end_to_end.py        # End-to-end tests against a running API + real MongoDB
-│   ├── conftest.py               # Shared fixtures (e.g. PWD)
-│   └── <more test files>.py
-│
-├── assets/                       # Static assets for README and dashboard
-│   ├── banner.png
-│   ├── exchange_client_page_1.png
-│   ├── exchange_client_page_2.png
-│   └── favicon.ico
-│
-├── .env                          # Environment variables (API_URL, PARTY_ID, PASSWORD, MONGO settings, etc.)
-├── requirements.txt              # Python dependencies
-├── Dockerfile                    # (Optional) Containerization
-└── README.md                     # This file
+JSON bodies for authenticated endpoints must include:
+
+```json
+{
+  "party_id": <int>,
+  "password": "<plaintext-password>",
+  // … other fields specific to the endpoint …
+}
 ```
 
----
+If authentication fails:
 
-## Getting Started
+* 401 Unauthorized (invalid credentials)
+* 403 Forbidden (admin required but not admin)
 
-### Prerequisites
+### Instrument Management
 
-* Python 3.9+
-* MongoDB 4.x running locally or remotely
-* (Optional) Docker
+#### `POST /new_book`
 
-Install dependencies:
+Create a new instrument (order book) in memory **and** persist metadata in Mongo.
 
-```bash
-pip install -r requirements.txt
-```
-
-Create a `.env` file in the project root:
-
-```ini
-API_URL=http://localhost:8000
-PARTY_ID=1
-PASSWORD=pw
-MONGO_HOST=localhost
-MONGO_PORT=27017
-MONGO_DB=exchange
-MONGO_USER=
-MONGO_PASS=
-ADMIN_ID=1
-ADMIN_PASSWORD=admin
-MCAST_GROUP=224.1.1.1
-MCAST_PORT=4444
-```
-
-### Installation
-
-1. Clone this repository:
-
-```bash
- git clone [https://github.com/your-org/RedleafExchange.git](https://github.com/your-org/RedleafExchange.git)
-cd RedleafExchange
-```
-
-2. Create a virtual environment (optional):
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-3. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-
-### Configuration
-
-All settings (Mongo, multicast, admin credentials) are controlled via `apps/exchange/settings.py`, which reads environment variables.
-Adjust as needed in your `.env` or environment.
-
----
-
-## Running the API Server
-
-Start MongoDB if not running (e.g., `brew services start mongodb-community`).
-
-Launch the FastAPI server:
-```bash
-uvicorn apps.exchange.api:app --host 0.0.0.0 --port 8000 --reload
-````
-
-On startup, the following occurs:
-
-* Logging is configured (`utils/logging.py`).
-* `Exchange.rebuild_from_database()` loads existing orders/trades from Mongo.
-* `QueuedDbWriter.startup()` starts the background writer loop.
-
-### API Endpoints
-
-* **POST `/new_book`**
-  Create a new instrument (admin only).
-  **Request body** (JSON):
+* **Authentication**: Admin only.
+* **Request JSON**:
 
   ```json
   {
-    "instrument_id": 100,
-    "instrument_name": "BTC-USD",
-    "instrument_description": "Bitcoin / US Dollar",
-    "party_id": 1,
-    "password": "admin"
+    "instrument_id": 55,
+    "instrument_name": "ExampleInstrument",
+    "instrument_description": "Optional human-readable description",
+    "party_id": 1,                // admin party ID
+    "password": "admin_password"
   }
   ```
+* **Response (200)**:
 
-  **Response**:
+  * On success:
 
-  * `{ "status": "CREATED", "instrument_id": 100 }` on success.
-  * `{ "status": "ERROR", "details": "instrument already exists" }` if duplicate.
+    ```json
+    {
+      "status": "CREATED",
+      "instrument_id": 55
+    }
+    ```
+  * If `instrument_id` already exists:
 
-* **POST `/orders`**
-  Place a new order (GTC, IOC, MARKET).
-  **Request body**:
+    ```json
+    {
+      "status": "ERROR",
+      "details": "instrument already exists"
+    }
+    ```
+
+### Orders
+
+#### `POST /orders`
+
+Place a new order of type `MARKET`, `GTC`, or `IOC`.
+
+* **Authentication**: Non-admin (any valid party).
+
+* **Request JSON**:
 
   ```json
   {
-    "instrument_id": 100,
-    "side": "BUY",
-    "order_type": "GTC",
-    "price_cents": 5000,    // required for GTC/IOC
-    "quantity": 2,
-    "party_id": 2,
-    "password": "pw"
+    "instrument_id": <int>,
+    "side": "BUY" | "SELL",
+    "order_type": "MARKET" | "GTC" | "IOC",
+    "quantity": <positive int>,
+    "price_cents": <non-neg int>       // required for GTC / IOC; omit/null for MARKET
+    "party_id": <int>,
+    "password": "<password>"
   }
   ```
 
-  **Response**:
+* **Behavior**:
+
+  1. Validate `instrument_id` exists; else return `{"status": "ERROR", "details": "unknown instrument"}`.
+  2. Validate fields via Pydantic—bad enum values or missing `price_cents` on GTC/IOC → `422 Unprocessable Entity` with validation details.
+  3. Generate a unique `order_id` via atomically incrementing `counters.seq` in Mongo.
+  4. Match (depending on `order_type`):
+
+     * **MARKET**: Crosses against best quotes until exhaustion or no liquidity.
+     * **GTC**: Attempt to match against the opposite book; any remaining quantity is “rested” (inserted into the book).
+     * **IOC**: Attempt to match; cancel any unfilled remainder.
+  5. For every match:
+
+     * Emit a `Trade` event (persist to `trades_<instrument_id>`).
+     * Update both maker & taker orders (quantity, filled quantity).
+     * If a resting order’s residual hits zero, delete from `live_orders_<instr>`.
+     * Any newly resting GTC order gets inserted into `live_orders_<instr>`.
+  6. Persist to:
+
+     * `orders_<instrument_id>` → full order snapshot (`replace_one` upsert).
+     * `live_orders_<instrument_id>` → upsert or delete (if fully filled/canceled).
+     * `trades_<instrument_id>` → insert a document per trade.
+
+* **Response (200)** on success:
 
   ```json
   {
     "status": "ACCEPTED",
-    "order_id": 42,
-    "remaining_qty": 2,
-    "cancelled": false,
-    "trades": [ /* any immediate fills */ ]
+    "order_id": <int>,            // unique ID assigned
+    "remaining_qty": <int>,
+    "cancelled": <bool>,          // true if IOC with no fill, else false
+    "trades": [
+      {
+        "instrument_id": <int>,
+        "price_cents": <int>,
+        "quantity": <int>,
+        "timestamp": <ns-timestamp>,
+        "maker_order_id": <int>,
+        "maker_party_id": <int>,
+        "taker_order_id": <int>,
+        "taker_party_id": <int>,
+        "maker_is_buyer": <bool>,
+        "maker_quantity_remaining": <int>,
+        "taker_quantity_remaining": <int>
+      },
+      // … potentially multiple trade objects …
+    ]
   }
   ```
 
-  * For MARKET orders, omit `price_cents` (it defaults to 0).
-  * For IOC, unfilled portion is automatically canceled.
-  * On validation error or unknown instrument: HTTP 422 with error details.
-
-* **POST `/cancel`**
-  Cancel an existing open order.
-  **Request body**:
+* **Response (ERROR)**:
 
   ```json
   {
-    "instrument_id": 100,
-    "order_id": 42,
-    "party_id": 2,
-    "password": "pw"
+    "status": "ERROR",
+    "details": "<string or Pydantic errors array>"
   }
   ```
 
-  **Response**:
+### Cancels
+
+#### `POST /cancel`
+
+Cancel a single open order (idempotent).
+
+* **Authentication**: Non-admin (any valid party).
+
+* **Request JSON**:
 
   ```json
-  { "status": "CANCELLED", "order_id": 42 }
+  {
+    "instrument_id": <int>,
+    "order_id": <int>,
+    "party_id": <int>,
+    "password": "<password>"
+  }
   ```
 
-  * If order was already filled/canceled or not found: `{ "status": "ERROR", "details": "order not open" }`.
+* **Behavior**:
 
-* **GET `/instruments`**
-  List all instruments (no auth required).
-  **Response**: Array of instrument metadata from Mongo (ID, name, description, created time, created by).
+  1. If `instrument_id` not found → `{"status": "ERROR", "details": "unknown instrument"}`.
+  2. If `order_id` not in that book or already canceled/filled → `{"status":"ERROR","details":"order not open"}`.
+  3. Otherwise:
 
-* **GET `/orders/{instrument_id}`**
-  List all historical orders for an instrument (sorted by `order_id`).
-  **Response**: Array of order documents from `orders_<instr>`.
+     * Mark the order’s `cancelled` flag in memory.
+     * Remove from `live_orders_<instr>` (background writer).
+     * Persist a “cancel” event into `orders_<instr>` (so DB snapshot shows it as canceled).
+     * Return status `"CANCELLED"`.
 
-* **GET `/live_orders/{instrument_id}`**
-  List all currently open (unfilled, uncanceled) orders.
-  **Response**: Array from `live_orders_<instr>`.
+* **Response (200)** on success:
 
-* **GET `/trades/{instrument_id}`**
-  List all executed trades for an instrument (sorted by timestamp).
+  ```json
+  {
+    "status": "CANCELLED",
+    "order_id": <int>
+  }
+  ```
 
-* **GET `/parties`**
-  List all parties (ID + name) for display.
+* **Response (200)** on failure (e.g. double‐cancel):
+
+  ```json
+  {
+    "status": "ERROR",
+    "details": "order not open"
+  }
+  ```
+
+#### `POST /cancel_all`
+
+Cancel **all** open orders for a particular party on a given instrument.
+
+* **Authentication**: Non-admin (any valid party).
+
+* **Request JSON**:
+
+  ```json
+  {
+    "instrument_id": <int>,
+    "party_id": <int>,
+    "password": "<password>"
+  }
+  ```
+
+* **Behavior**:
+
+  1. Validate instrument exists; else return `{"status":"ERROR","details":"unknown instrument"}`.
+  2. Iterate over `book.oid_map.items()`:
+
+     * If `order.party_id == party_id`, cancel it (idempotent).
+     * Keep track of `cancelled_ids` vs. `failed_ids` (double‐cancels).
+  3. For every newly canceled order:
+
+     * Persist “cancel” event in `orders_<instr>`.
+     * Remove from `live_orders_<instr>`.
+  4. Return summary.
+
+* **Response (200)**:
+
+  ```json
+  {
+    "status": "CANCELLED_ALL",
+    "cancelled_order_ids": [<id1>, <id2>, …],
+    "failed_order_ids": [<idX>, …]    // e.g. if some orders were already filled/canceled
+  }
+  ```
+
+### Queries (Orders / Live Orders / Trades)
+
+No authentication required. All return JSON arrays of documents.
+
+* **`GET /instruments`**
+  Return all rows in `instruments` (excluding `_id`), sorted by `created_time` ascending.
+
+  ```json
+  [
+    {
+      "instrument_id": 1,
+      "instrument_name": "EquityFoo",
+      "instrument_description": "Foo Corp stock",
+      "created_time": "2025-05-31T14:23:00+0000",
+      "created_by": 1
+    },
+    { … }, …
+  ]
+  ```
+
+* **`GET /orders/{instrument_id}`**
+  All historical orders (including canceled/filled) from `orders_<instrument_id>`, sorted by `order_id` ascending.
+
+  ```json
+  [
+    {
+      "order_id": 1,
+      "instrument_id": 1,
+      "side": "SELL",
+      "order_type": "GTC",
+      "price_cents": 10000,
+      "quantity": 5,
+      "timestamp": 1748871516613951000,
+      "party_id": 1,
+      "cancelled": false,
+      "filled_quantity": 3,
+      "remaining_quantity": 2
+    },
+    // …
+  ]
+  ```
+
+* **`GET /live_orders/{instrument_id}`**
+  Only currently‐open orders from `live_orders_<instrument_id>`, sorted by `order_id` ascending.
+
+  ```json
+  [
+    {
+      "order_id": 17,
+      "instrument_id": 1,
+      "side": "BUY",
+      "order_type": "GTC",
+      "price_cents": 10100,
+      "quantity": 3,
+      "timestamp": 1748871646869633000,
+      "party_id": 2,
+      "cancelled": false,
+      "filled_quantity": 0,
+      "remaining_quantity": 3
+    },
+    // …
+  ]
+  ```
+
+* **`GET /trades/{instrument_id}`**
+  All trades from `trades_<instrument_id>`, sorted by `timestamp` ascending.
+
+  ```json
+  [
+    {
+      "instrument_id": 1,
+      "price_cents": 10000,
+      "quantity": 3,
+      "timestamp": 1748871646869633000,
+      "maker_order_id": 16,
+      "maker_party_id": 1,
+      "taker_order_id": 17,
+      "taker_party_id": 2,
+      "maker_is_buyer": false,
+      "maker_quantity_remaining": 2,
+      "taker_quantity_remaining": 0
+    },
+    // …
+  ]
+  ```
+
+* **`GET /parties`**
+  Return every party’s friendly name: `[{ "party_id": 12, "party_name": "MegaFund" }, …]`.
+
+### Parties (Authentication)
+
+* Parties are loaded from the `parties` collection in Mongo. Each document has:
+
+  ```json
+  {
+    "party_id": <int>,
+    "party_name": "<string>",
+    "password": "<bcrypt-hash>",
+    "is_admin": <bool>
+  }
+  ```
+* See `apps/exchange/mongo_party_auth.py` for:
+
+  * In‐memory caching of bcrypt hashes.
+  * `Auth` dependency that raises HTTP 401/403 on invalid credentials or insufficient privileges.
 
 ---
 
-## Client SDK Usage
+## ExchangeClient (Python Library)
 
-Use `exchange_client.py` or the `ExchangeClient` in `apps/trader/bot_trader/public_endpoints.py` to interact programmatically.
+`apps/trader/bot_trader/public_endpoints.py` provides a convenient wrapper around all public API endpoints.
 
-Example:
+### Configuration
 
 ```python
-from exchange_client import ExchangeClient, ExchangeClientConfig, ValidationError, ExchangeClientError
+from apps.trader.bot_trader.public_endpoints import ExchangeClientConfig, ExchangeClient
 
-config = ExchangeClientConfig(api_url="http://localhost:8000", default_party_id=2, default_password="pw")
-client = ExchangeClient(config)
+# Option 1: Read from .env (API_URL, PARTY_ID, PASSWORD)
+cfg = ExchangeClientConfig()
+client = ExchangeClient(cfg)
 
-# Create a book (admin)
-try:
-    resp = client.create_order_book(instrument_id=100, instrument_name="ABC", instrument_description="Test")
-    print("Created", resp)
-except Exception as e:
-    print("Error creating book:", e)
-
-# Place a GTC SELL
-try:
-    sell = client.place_order(instrument_id=100, side="SELL", order_type="GTC", price_cents=10000, quantity=5)
-    print("Sell order placed", sell)
-except ValidationError as ve:
-    print("Validation error:", ve.details)
-except ExchangeClientError as ce:
-    print("Client error:", ce)
-
-# Cancel an order
-cancel = client.cancel_order(instrument_id=100, order_id=42)
-print("Cancel response", cancel)
+# Option 2: Explicit parameters
+cfg = ExchangeClientConfig(
+    api_url="http://localhost:8000",
+    default_party_id=2,
+    default_password="test123"
+)
+client = ExchangeClient(cfg)
 ```
 
-The SDK handles JSON serialization, HTTP errors, and validation.
+Environment variables (if not overridden):
+
+```
+API_URL=http://localhost:8000
+PARTY_ID=2
+PASSWORD=test123
+```
+
+### Common Operations
+
+#### 1. Create a New Instrument (Admin)
+
+```python
+from apps.trader.bot_trader.public_endpoints import ExchangeClientError
+
+try:
+    resp = client.create_order_book(
+        instrument_id=100,
+        instrument_name="ExampleInstr",
+        instrument_description="Some description",
+        admin_party_id=1,        # overrides default PARTY_ID
+        admin_password="adminpw" # overrides default PASSWORD
+    )
+    print(resp)  # {"status": "CREATED", "instrument_id": 100}
+except ExchangeClientError as e:
+    print("Failed to create book:", e)
+```
+
+#### 2. Place a New Order
+
+```python
+# GTC SELL
+try:
+    sell_resp = client.place_order(
+        instrument_id=100,
+        side="SELL",
+        order_type="GTC",
+        price_cents=10000,
+        quantity=5
+    )
+    # e.g. { "status": "ACCEPTED", "order_id": 42, "remaining_qty": 5, "cancelled": false, "trades": [] }
+    print("Sell placed:", sell_resp)
+except ValidationError as e:
+    print("Validation error:", e.details)
+except HTTPRequestError as e:
+    print("HTTP error:", e)
+except ExchangeClientError as e:
+    print("Client error:", e)
+
+# MARKET BUY (fills immediately against resting asks)
+try:
+    buy_resp = client.place_order(
+        instrument_id=100,
+        side="BUY",
+        order_type="MARKET",
+        quantity=3
+    )
+    print("Market buy:", buy_resp)
+    # trades: list of executed trades
+except ExchangeClientError as e:
+    print("Order failed:", e)
+```
+
+#### 3. Cancel a Single Order
+
+```python
+try:
+    cancel_resp = client.cancel_order(
+        instrument_id=100,
+        order_id=42
+    )
+    print("Cancel response:", cancel_resp)
+    # e.g. { "status": "CANCELLED", "order_id": 42 }
+except HTTPRequestError as e:
+    print("HTTP error:", e)
+except ExchangeClientError as e:
+    print("Cancel failed:", e)
+```
+
+### Error Handling
+
+* **`ValidationError`**: Thrown when the API returns HTTP 422.
+
+  * Usually indicates invalid payload (missing `price_cents` on GTC, bad enum, or unknown instrument).
+  * `e.details` contains the Pydantic error array or API‐returned details.
+
+* **`AuthenticationError`**: Thrown when credentials are invalid (HTTP 401) or non-admin attempts admin action (HTTP 403).
+
+* **`HTTPRequestError`**: Thrown for any other non-2xx HTTP status. Contains `status_code` and message.
+
+* **`ExchangeClientError`**: Base class; other errors inherit from it.
 
 ---
 
-## Web Dashboard
+## MongoDB Schema & Persistence
 
-A real-time dashboard built with Dash (Plotly) and multicast events.
+The Exchange relies on a single Mongo database (default name: `exchange`). Collections are created on demand when a new instrument is registered.
 
-Run:
+Configuration (via `.env` or environment variables):
+
+```
+MONGO_HOST=localhost
+MONGO_PORT=27017
+MONGO_USER=       # optional
+MONGO_PASS=       # optional
+MONGO_DB=exchange
+```
+
+### `instruments` Collection
+
+* **Name**: `instruments`
+* **Fields**:
+
+  ```json
+  {
+    "instrument_id": <int>,
+    "instrument_name": "<string>",
+    "instrument_description": "<string>",
+    "created_time": "<ISODate>",
+    "created_by": <int>    // party_id of admin who created
+  }
+  ```
+* **Usage**:
+
+  * Populated by `POST /new_book`.
+  * Queried by `GET /instruments`.
+  * Used at startup to rebuild in-memory order books.
+
+### `orders_<instrument_id>`
+
+* **One collection per instrument**, named `orders_<instr>`.
+* **Fields**:
+
+  ```json
+  {
+    "order_id": <int>,            // unique index
+    "instrument_id": <int>,
+    "side": "BUY" | "SELL",
+    "order_type": "MARKET"|"GTC"|"IOC",
+    "price_cents": <int>,
+    "quantity": <int>,
+    "timestamp": <ns-int>,
+    "party_id": <int>,
+    "cancelled": <bool>,
+    "filled_quantity": <int>,
+    "remaining_quantity": <int>
+  }
+  ```
+* **Indexes**:
+
+  * Unique on `order_id`.
+  * (Optionally index on `timestamp` if needed.)
+
+### `live_orders_<instrument_id>`
+
+* **One collection per instrument**, named `live_orders_<instr>`.
+* **Fields** (identical to `orders_<instr>`, but only open orders):
+
+  ```json
+  {
+    "order_id": <int>,            // unique index
+    "instrument_id": <int>,
+    "side": "BUY" | "SELL",
+    "order_type": "GTC",          // MARKET and IOC never rest
+    "price_cents": <int>,
+    "quantity": <int>,
+    "timestamp": <ns-int>,
+    "party_id": <int>,
+    "cancelled": false,
+    "filled_quantity": <int>,
+    "remaining_quantity": <int>
+  }
+  ```
+* **Indexes**:
+
+  * Unique on `order_id`.
+
+### `trades_<instrument_id>`
+
+* **One collection per instrument**, named `trades_<instr>`.
+* **Fields**:
+
+  ```json
+  {
+    "instrument_id": <int>,
+    "price_cents": <int>,
+    "quantity": <int>,
+    "timestamp": <ns-int>,
+    "maker_order_id": <int>,
+    "maker_party_id": <int>,
+    "taker_order_id": <int>,
+    "taker_party_id": <int>,
+    "maker_is_buyer": <bool>,
+    "maker_quantity_remaining": <int>,
+    "taker_quantity_remaining": <int>
+  }
+  ```
+* **Indexes**:
+
+  * Index on `timestamp`.
+
+### `parties`
+
+* **Authentication collection**.
+* **Fields**:
+
+  ```json
+  {
+    "party_id": <int>,
+    "party_name": "<string>",
+    "password": "<bcrypt-hash>",
+    "is_admin": <bool>
+  }
+  ```
+* **Usage**:
+
+  * Used by `Auth` dependency to load and cache bcrypt password hashes.
+  * Populated via a setup script (`scripts/load_parties.py`) reading from a CSV.
+
+### `counters`
+
+* **Single document** keyed by `_id = "order_id"`.
+* **Fields**:
+
+  ```json
+  {
+    "_id": "order_id",
+    "seq": <int>   // current head of monotonic counter
+  }
+  ```
+* **Usage**:
+
+  * Atomically incremented on every new order:
+
+    ```python
+    doc = coll.find_one_and_update(
+      {"_id": "order_id"},
+      {"$inc": {"seq": 1}},
+      return_document=ReturnDocument.AFTER,
+      upsert=True
+    )
+    next_id = doc["seq"]
+    ```
+
+### Initializing Collections & Indexes
+
+A helper script (`apps/exchange/mongo_admin.py` + `scripts/init_exchange_db.py`) can pre-create all index structures:
 
 ```bash
-python exchange_dash_app.py
+# Example invocation (runs async)
+python scripts/init_exchange_db.py
 ```
 
-Features:
+This will ensure:
 
-* **Banner**: Instrument name, description, last trade price/time, maker/taker.
-* **Order Entry**: Place GTC/IOC orders, cancel all open orders.
-* **Order Book**: Live bid/ask levels with colored quantity bars.
-* **Price Chart**: Real-time price line chart + 20-period moving average.
-* **Recent Trades**: Scrollable table of latest trades.
-* **Open Orders (Me)**: View and cancel your party’s open orders.
-* **Positions (Everyone)**: Net position summary (qty, value, avg price, trade times).
-
-The dashboard fetches initial state via REST (`/live_orders`, `/trades`) and then listens to UDP multicast (GROUP\:PORT) for live updates.
+* `orders_<instr>` exists with unique index on `order_id`.
+* `live_orders_<instr>` exists with unique index on `order_id`.
+* `trades_<instr>` exists with index on `timestamp`.
 
 ---
 
-## Key Components
+## Running the Exchange API
 
-### Order Book (`apps/exchange/order_book.py`)
+### Environment Variables
 
-* **`PriceLevel`**: Maintains a FIFO queue of orders at a given price, prunes filled/canceled.
-* **`PriceHeap`**: A min-heap for asks (and max-heap via negation for bids) with lazy deletion.
-* **`OrderBook`**:
+Create a `.env` file at the repository root (or export environment variables):
 
-  * `submit(order: Order)` handles MARKET, GTC, IOC:
+```
+# MongoDB connection
+MONGO_HOST=localhost
+MONGO_PORT=27017
+MONGO_USER=             # optional if auth enabled
+MONGO_PASS=             # optional
+MONGO_DB=exchange
 
-    * **MARKET**: Repeatedly match best price until no quantity or no counter orders.
-    * **GTC**: Match at or better prices, then rest any residue.
-    * **IOC**: Match at or better prices, then cancel any residue.
-  * `rest_order`: Inserts into price-level map and heap, and into `oid_map`.
-  * `cancel(order_id)`: Idempotent cancel, cleans up heap/level and removes from `oid_map`.
-  * Matching uses `_match_limit`, `_execute_market`, and `_match_orders` to generate `Trade` objects and fill both sides.
-  * `best_bid()` / `best_ask()` return top-of-book prices or `None`.
+# Multicast (optional)
+MCAST_GROUP=224.1.1.1
+MCAST_PORT=4444
 
-### Exchange Core (`apps/exchange/exchange.py`)
+# Admin credentials
+ADMIN_ID=1
+ADMIN_PASSWORD=adminpw
 
-* **Pydantic DTOs**:
+# ExchangeClient defaults (for local bots/scripts)
+API_URL=http://localhost:8000
+PARTY_ID=1
+PASSWORD=adminpw
+```
 
-  * `NewOrderReq`: Validates `instrument_id`, `side`, `order_type`, `price_cents`, `quantity`, `party_id`, `password`.
-  * `CancelReq`: Validates `instrument_id`, `order_id`, `party_id`, `password`.
+### Install Dependencies
 
-* **`Exchange` Class**:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+# requirements.txt should include:
+#   fastapi, uvicorn, pydantic, motor, pymongo, bcrypt, requests, python-dotenv,
+#   dash, dash-bootstrap-components, plotly, etc.
+```
 
-  * Manages multiple `OrderBook` instances in memory (`self._books`).
-  * `create_order_book(instrument_id)`: Instantiates an `OrderBook`, calls writers to create DB collections.
-  * `handle_new_order(payload)`: Validates via Pydantic, retrieves the book, builds a new `Order` with a unique `order_id`, submits to `OrderBook`, records orders/trades, updates live orders via writers, returns JSON.
-  * `handle_cancel(payload)`: Validates, retrieves book, calls `book.cancel(order_id)`, updates writers, returns JSON.
-  * Cold-start: `rebuild_from_database()` streams all orders from writers’ `iter_orders()`, replays live ones into `OrderBook`, and sets `self._next_oid`.
+### Start MongoDB
 
-### Persistence & Writers
+Make sure MongoDB is running on the configured `MONGO_HOST:MONGO_PORT`. If you have authentication enabled, create an admin/user in the `exchange` database with appropriate roles.
 
-#### CompositeWriter (`apps/exchange/composite_writer.py`)
+### Initialize Collections & Indexes (Optional)
 
-* Wraps multiple writer backends (ordered as primary, secondary, …). Any call (e.g., `record_order`, `record_trade`, `record_cancel`, `create_instrument`, `iter_orders`, `list_instruments`) is fanned out: the first writer’s return value is returned, and others are called for side effects.
+```bash
+python scripts/init_exchange_db.py
+```
 
-#### MongoQueuedDbWriter (`apps/exchange/mongo_queued_db_writer.py`)
+You can also let the application create collections on-demand; however, running the initialization ensures indexes exist before load.
 
-* **Sync client** (PyMongo) used during `rebuild_from_database()`: `list_instruments()`, `iter_orders()`, `create_instrument()` use blocking calls.
-* **Async client** (Motor) for hot-path writes:
+### Start FastAPI Server
 
-  * Maintains an `asyncio.Queue[(msg_type, payload)]`.
-  * Methods (`record_order`, `record_trade`, `record_cancel`, `upsert_live_order`, `remove_live_order`, `update_order_quantity`) simply enqueue messages, never blocking.
-  * Background consumer loop drains the queue and executes DB operations (inserting into `orders_<instr>`, `trades_<instr>`, deleting/upserting into `live_orders_<instr>`).
-  * `startup()` spawns the loop; `shutdown()` flushes remaining writes and cancels.
+From the repo root:
 
-#### TextBackupWriter (`apps/exchange/text_backup_writer.py`)
+```bash
+uvicorn apps.exchange.api:app --host 0.0.0.0 --port 8000 --reload
+```
 
-* For each instrument:
+This will:
 
-  * Creates CSV files: `orders_<instr>.csv`, `trades_<instr>.csv`, `cancels_<instr>.csv`, `live_events_<instr>.csv`.
-  * On `record_order`, `record_trade`, `record_cancel`, `upsert_live_order`, schedules an `asyncio.to_thread` that writes a row to the appropriate CSV.
-  * Does not support replay (`iter_orders()` returns empty).
+1. On startup:
 
-#### MulticastWriter (`apps/exchange/multicast_writer.py`)
+   * Query `instruments` collection for existing instrument IDs.
+   * Call `ex.create_order_book(instr_id)` for each → create in-memory `OrderBook`.
+   * Call `await ex.rebuild_from_database(queued_db_writer)` to replay persisted orders (unfilled & not canceled) into in-memory book.
+   * Start the background consumer (`queued_db_writer.startup()`) that drains the event queue and writes to Mongo.
 
-* Sends JSON-encoded events (`ORDER`, `TRADE`, `CANCEL`) via UDP to a multicast group/port for real-time consumption.
-* Methods (`record_order`, `record_trade`, `record_cancel`) serialize the payload and send over UDP.
-* Used by `exchange/api.py` to push live updates to dashboards.
+2. Expose endpoints on port 8000.
 
-### Authentication (`apps/exchange/mongo_party_auth.py`)
+### Verify Basic Health
 
-* **`MongoPartyAuth`** loads all party records (`party_id`, bcrypt-hashed `password`) from Mongo into a cache.
+* `GET http://localhost:8000/instruments` → should return `[]` initially (unless you pre-seeded instruments).
+* `GET http://localhost:8000/parties` → should list all loaded parties from Mongo.
 
-  * `verify(party_id, password)`: Checks cache or fetches from Mongo.
-  * `get(party_id)`: Returns party document (minus `_id`).
+---
 
-* **`Auth`** dependency for FastAPI:
+## Dash Dashboard
 
-  * `require_admin=False`: Verifies `party_id`/`password` via `MongoPartyAuth.verify`, fetches party data, and attaches it to `request.state.party`.
-  * `require_admin=True`: Additionally checks `party_doc['is_admin']`.
-  * Used in `api.py`: Admin routes (`/new_book`) require admin, others use common auth.
+### Overview
 
-### Logging (`apps/exchange/logging.py`)
+The dashboard (`exchange_dash_app.py`) provides a Bloomberg-like UI:
 
-* **`setup(level, fname)`** configures the root logger once:
+* **Banner**
 
-  * Console handler with a formatted output (`timestamp | level | name | message`).
-  * `QuarterHourRotator` file handler (rotates every 15 minutes, unlimited backups).
+  * Instrument name, description, last price (green), last trade time, last maker/taker, “created by” info.
+  * Key stats: Open Interest (sum of all quantities in both sides of the book), Total Volume Traded, Total Value Traded.
 
-* **`QuarterHourRotator`** extends `TimedRotatingFileHandler` to roll files every 15 minutes without altering the base filename format.
+* **Order Entry Panel**
 
-### CLI Utilities (`scripts/`)
+  * Select Instrument, Party ID, Password, Quantity, Price (e.g. 101.23), OrderType (GTC/IOC).
+  * BUY / SELL buttons.
+  * “Cancel All Open Orders” button.
 
-* **`populate_dummy_test_instrument.py`**
+* **Order Book (Left, 50vh)**
 
-  * Creates a test instrument (ID 9999) and populates with 20 bid & ask GTC orders, then sends random market orders to generate trades.
-  * Uses `ExchangeClient` to interact with the API.
+  * Scrollable DataTable with three columns: Bid Qty, Price, Ask Qty.
+  * Color-bar visualizations (bids: green, asks: red).
+  * Updated every second by polling `GET /live_orders/{instr_id}`.
 
-* **`bootstrap_db.py`**
+* **Price Chart (Right, 40vh)**
 
-  * Creates MongoDB collections & indexes for a list of instrument IDs (e.g., `[1,2,3,4,5]`).
-  * Uses `MongoAdmin` to issue `createIndexes` for each collection: `orders_<instr>`, `trades_<instr>`, `live_orders_<instr>`.
+  * Plotly graph of price vs. time (line plot + 20-period moving average).
+  * Updated from `GET /trades/{instr_id}` (most recent N trades).
 
-* **`import_parties.py`**
+* **Recent Trades (Left, 50vh)**
 
-  * Reads `scripts/parties.csv` with fields: `party_id,party_name,password,is_admin`.
-  * Hashes passwords with `bcrypt` and inserts into `parties` collection.
-  * Skips invalid rows.
+  * Scrollable DataTable of trades: Time, Price, Quantity, Total (dollars), Maker, Taker.
+  * Sorted with most recent trade at top.
 
-* **`<other>`**: Scripts for additional tasks (e.g., cleaning up, backups).
+* **Open Orders (Me) (Right)**
+
+  * Input row: Party ID, Password, “Fetch My Orders” button.
+  * Displays a personal table of open orders for that party (OID, Side, Price, Qty).
+  * Each row has a “Cancel” button for single-order cancel.
+
+* **Positions (Everyone, Full Width, 50vh)**
+
+  * Computes realized vs. unrealized P\&L per party:
+
+    * **Realized P\&L**: sum of profits/losses on closed trades.
+    * **Unrealized P\&L**: mark-to-market net position at last mid-price.
+    * **Total P\&L**: Realized + Unrealized.
+  * Sorted by highest absolute net quantity.
+
+### Key Views & Interaction
+
+1. **Dashboard Startup**
+
+   * Dash app queries `GET /instruments` to build instrument dropdown.
+   * Queries `GET /parties` to map party IDs → names (for trade display).
+
+2. **Periodic Polling** (`dcc.Interval` every `REFRESH_MS` ms)
+
+   * `GET /live_orders/{instr_id}` → build order book depth, compare by order IDs to detect changes.
+   * `GET /trades/{instr_id}` → retrieve all trades, keep only most recent `MAX_TRADES`.
+   * If anything changed, update the data stores (`store-book`, `store-trades`, `store-order-ids`, `store-last-trade-ts`).
+
+3. **Callbacks**
+
+   * **`render_book`**: consumes `store-book` → derive rows/columns/styles for bids/asks.
+   * **`render_trades_and_chart`**:
+
+     * Reverse‐iterate `trades_data` to show most recent at top.
+     * Build a Plotly chart (line + 20-period MA).
+   * **`render_banner`**: shows instrument metadata, last price/time, maker/taker, and summary stats.
+   * **`fetch_open_orders`**: on “Fetch My Orders” click → `GET /live_orders/{instr_id}`, filter by `party_id`, display as table with per-row Cancel buttons.
+   * **`cancel_open`**: when per-order Cancel button clicked → `POST /cancel`.
+   * **`cancel_all`**: on “Cancel All Open Orders” click → `POST /cancel_all`.
+   * **`send_new_order`**: on BUY/SELL click → validate local inputs → `POST /orders`.
+   * **`render_positions`**: from `store-trades`, compute net P\&L per party, show in table.
+
+4. **Styling & Theme**
+
+   * Dark background (`#1f2124`), Bloomberg-orange text (`#fb8b1e`), bright green highlights (`#00b050`).
+   * Mono‐spaced font (`IBM Plex Mono`).
+   * Custom CSS in `app.index_string` to style inputs, dropdowns, scrollbars, etc.
 
 ---
 
 ## Testing
 
-### Unit Tests
+### Unit & Integration Tests
 
-* **OrderBook Tests** (`tests/test_order_book_extended.py`): Extensive fuzz tests, priority, matching logic, cancel behavior, heap pruning.
-* **API Integration** (`tests/test_app.py`, `tests/conftest.py`): Spins up a FastAPI app with `DummyWriter` to simulate persistence, tests endpoints.
-* **Client SDK Examples** (`apps/trader/bot_trader/examples/example_endpoints.py`): Demonstrates typical flows.
+All tests live under the `tests/` directory. The suite covers:
 
-Run:
+1. **`tests/test_order_book_extended.py`**
+
+   * Extensive coverage of `OrderBook` behaviors:
+
+     * Price–time priority, best bid/ask invariants.
+     * Partial fills across multiple price levels.
+     * Idempotent cancels, heap cleanup, fuzz (random inserts/cancels).
+     * Ensures no negative spreads, correct behavior on MARKET vs. IOC.
+
+2. **`tests/test_app.py` & `tests/conftest.py`**
+
+   * Spin up a lightweight FastAPI app with a `DummyWriter`.
+   * Verify API endpoints:
+
+     * `/new_book` happy path vs. duplicate ID.
+     * `/orders` for GTC lifecycle (limit add, cross trade, residual cancel).
+     * MARKET sweep logic (multi‐level).
+     * IOC full cancel.
+     * Validation errors (missing fields, bad enums).
+     * `/cancel` idempotency and unknown instrument.
+     * Monotonic `order_id` assignment.
+     * Rebuild from `DummyWriter` + subsequent MARKET sweep.
+
+3. **`tests/test_end_to_end.py`**
+
+   * Full integration against a **real MongoDB** (using `ExchangeClient`):
+
+     * Admin creates instruments 100, 200, 300, 400.
+     * Non-admin places GTC trades, partial fills, cancels.
+     * Market sweeps multi-levels.
+     * IOC outside spread.
+     * Validation paths (422).
+     * High-volume fuzz across parties.
+     * Finally, inspect raw Mongo collections for each instrument:
+
+       * `orders_<instr>` count and total filled.
+       * `live_orders_<instr>` count.
+       * `trades_<instr>` count and sum of quantities.
+       * Invariants: sum of live remaining + sum of trade quantities == sum of submitted quantities.
+
+#### Running Tests
+
+1. Ensure a local MongoDB is running (authentication configured as per `.env` if needed).
+2. In one terminal:
+
+   ```bash
+   pytest -q
+   ```
+3. All tests should pass—if not, inspect error logs for stack traces.
+
+---
+
+## Appendix: Example Workflows
+
+### 1. Create Instrument → Place GTC Order → Cross Trade → Cancel Residual
 
 ```bash
-pytest -v
+# 1) Create instrument #100 (admin credentials)
+curl -X POST http://localhost:8000/new_book \
+  -H "Content-Type: application/json" \
+  -d '{
+        "instrument_id": 100,
+        "instrument_name": "DemoStock",
+        "instrument_description": "Demo Instrument",
+        "party_id": 1,
+        "password": "adminpw"
+      }'
 ```
 
-### End-to-End Tests (`tests/test_end_to_end.py`)
+```json
+{ "status": "CREATED", "instrument_id": 100 }
+```
 
-* Requires a running API server and real MongoDB.
-* **TestFlow**:
+```bash
+# 2) Place a GTC SELL 5 @ $100.00 (party 2)
+curl -X POST http://localhost:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+        "instrument_id": 100,
+        "side": "SELL",
+        "order_type": "GTC",
+        "price_cents": 10000,
+        "quantity": 5,
+        "party_id": 2,
+        "password": "pw2"
+      }'
+```
 
-  1. Admin client creates books 100, 200, 300, 400.
-  2. Non-admin places/cancels orders, verifies matching and residuals.
-  3. High-volume fuzz tests.
-  4. Final database state checks for invariants (total filled quantities, live orders, trade counts).
+```json
+{
+  "status": "ACCEPTED",
+  "order_id": 1,
+  "remaining_qty": 5,
+  "cancelled": false,
+  "trades": []
+}
+```
 
-Environment: Ensure `EXCHANGE_API_URL` and Mongo credentials match.
+```bash
+# 3) Place a crossing GTC BUY 3 @ $101.00 (party 3)
+curl -X POST http://localhost:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+        "instrument_id": 100,
+        "side": "BUY",
+        "order_type": "GTC",
+        "price_cents": 10100,
+        "quantity": 3,
+        "party_id": 3,
+        "password": "pw3"
+      }'
+```
+
+```json
+{
+  "status": "ACCEPTED",
+  "order_id": 2,
+  "remaining_qty": 0,
+  "cancelled": false,
+  "trades": [
+    {
+      "instrument_id": 100,
+      "price_cents": 10000,
+      "quantity": 3,
+      "timestamp": 1748871646869633000,
+      "maker_order_id": 1,
+      "maker_party_id": 2,
+      "taker_order_id": 2,
+      "taker_party_id": 3,
+      "maker_is_buyer": false,
+      "maker_quantity_remaining": 2,
+      "taker_quantity_remaining": 0
+    }
+  ]
+}
+```
+
+```bash
+# 4) Cancel the remaining SELL (2 units) on party 2
+curl -X POST http://localhost:8000/cancel \
+  -H "Content-Type: application/json" \
+  -d '{
+        "instrument_id": 100,
+        "order_id": 1,
+        "party_id": 2,
+        "password": "pw2"
+      }'
+```
+
+```json
+{ "status": "CANCELLED", "order_id": 1 }
+```
+
+### 2. MARKET Sweep Multi-Level
+
+```bash
+# Rest 3 SELL orders at different prices (party 4)
+curl -X POST http://localhost:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"instrument_id": 200, "side": "SELL", "order_type":"GTC", "price_cents":20000, "quantity":1, "party_id":4, "password":"pw4"}'
+curl -X POST http://localhost:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"instrument_id": 200, "side": "SELL", "order_type":"GTC", "price_cents":20005, "quantity":2, "party_id":4, "password":"pw4"}'
+curl -X POST http://localhost:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{"instrument_id": 200, "side": "SELL", "order_type":"GTC", "price_cents":20010, "quantity":3, "party_id":4, "password":"pw4"}'
+```
+
+```bash
+# Now send a MARKET BUY of qty=4 (party 5)
+curl -X POST http://localhost:8000/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+        "instrument_id": 200,
+        "side": "BUY",
+        "order_type":"MARKET",
+        "quantity":4,
+        "party_id":5,
+        "password":"pw5"
+      }'
+```
+
+```json
+{
+  "status": "ACCEPTED",
+  "order_id": 10,
+  "remaining_qty": 0,
+  "cancelled": false,
+  "trades": [
+    { "price_cents":20000,"quantity":1, … },
+    { "price_cents":20005,"quantity":2, … },
+    { "price_cents":20010,"quantity":1, … }
+  ]
+}
+```
+
+### 3. Cancel All Open Orders for a Party
+
+```bash
+# party 2 wants to cancel all open GTCs on instr 200
+curl -X POST http://localhost:8000/cancel_all \
+  -H "Content-Type: application/json" \
+  -d '{"instrument_id":200,"party_id":2,"password":"pw2"}'
+```
+
+```json
+{
+  "status": "CANCELLED_ALL",
+  "cancelled_order_ids": [ 15, 18, 22 ],
+  "failed_order_ids": [ 19 ]    // e.g. if one was already filled/canceled
+}
+```
+
+### 4. Query Live Orders & Trades
+
+```bash
+# Live book depth
+curl http://localhost:8000/live_orders/200
+```
+
+```json
+[
+  {
+    "order_id": 20,
+    "instrument_id": 200,
+    "side":"BUY",
+    "order_type":"GTC",
+    "price_cents":19900,
+    "quantity":2,
+    "timestamp":1748872000000000000,
+    "party_id":5,
+    "cancelled":false,
+    "filled_quantity":0,
+    "remaining_quantity":2
+  },
+  // …
+]
+```
+
+```bash
+# All historic trades
+curl http://localhost:8000/trades/200
+```
+
+```json
+[
+  {
+    "instrument_id":200,
+    "price_cents":20000,
+    "quantity":1,
+    "timestamp":1748871646869633000,
+    "maker_order_id":12, … 
+  },
+  // …
+]
+```
+
+### 5. Fetch Positions (via Dashboard)
+
+* Positions (realized/unrealized P\&L) are computed client-side based on `GET /trades/{instr}` and the last mid-price from the book.
 
 ---
 
-## Contributing
+## Conclusion
 
-We welcome contributions! Please:
+Redleaf Exchange is a production-grade order matching engine with:
 
-1. Fork the repo and create a feature branch.
-2. Write tests for new functionality.
-3. Submit a PR with clear description.
+* **FastAPI** for RESTful APIs.
+* **Pydantic validation** for strict request schema enforcement.
+* **An efficient in-memory OrderBook** with price-time priority, multi-level matching, partial fills, and idempotent cancels.
+* **MongoDB persistence** using an asynchronous queue to maintain consistency and performance.
+* **Dash-based realtime dashboard** to visualize order depth, price charts, trades, and P\&L.
+* **Comprehensive testing suite** (unit, integration, end-to-end) to ensure correctness under high load and random fuzz.
+* **A user-friendly Python client library** (`ExchangeClient`) to integrate with algorithmic trading bots or other services.
 
-For major changes, open an issue first to discuss.
+To get started:
 
----
+1. Configure your environment (`.env`) with Mongo credentials, admin password, and API URL.
+2. Start MongoDB, then run `uvicorn apps.exchange.api:app`.
+3. Optionally initialize collections and indexes via `python scripts/init_exchange_db.py`.
+4. Spin up the dashboard with `python exchange_dash_app.py`.
+5. Use `ExchangeClient` or `curl`/`Postman` to create instruments, place orders, and monitor trades.
 
-## License
-
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-**Enjoy trading!**
-
-*— The Redleaf Exchange Team*
+Enjoy building and trading on Redleaf Exchange!

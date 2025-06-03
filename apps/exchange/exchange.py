@@ -4,13 +4,17 @@ import logging
 from time import time_ns
 from typing import Dict, List
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
-from dataclasses import asdict
+from pymongo import ReturnDocument
+from pymongo import MongoClient
 
+from apps.exchange.mongo_queued_db_writer import QueuedDbWriter
 from apps.exchange.order_book   import OrderBook
 from apps.exchange.models import Order, Trade, Side, OrderType
 from apps.exchange.composite_writer import CompositeWriter
+from apps.exchange.settings import get_settings, admin_uri
 
-# ───────────────────── request DTOs ───────────────────────────────────
+SET = get_settings()
+
 class _AuthMixin(BaseModel):
     party_id: int  = Field(gt=0)
     password: str  = Field(min_length=1)
@@ -55,18 +59,30 @@ class CancelReq(_AuthMixin):
     instrument_id: int
     order_id: int
 
+class CancelAllReq(_AuthMixin):
+    instrument_id: int
 
-# ───────────────────── Exchange ───────────────────────────────────────
+
 class Exchange:
     def __init__(self, writer: CompositeWriter):
         self.log = logging.getLogger("Exchange")
         self._writer = writer
         self._books: Dict[int, OrderBook] = {}
-        self._next_oid: int = 1
         self.log.info("Exchange starting — rebuilding books ...")
         self.log.info("Exchange rebuild complete — ready to serve")
-        self.log.info("OID counter starts at %s", self._next_oid)
         self._empty_hit = 0
+        self._mongo_client = MongoClient(admin_uri())
+        self.mongo_db = self._mongo_client[SET.mongo_db]
+
+    def _get_next_order_id(self) -> int:
+        coll = self.mongo_db["counters"]
+        doc = coll.find_one_and_update(
+            {"_id": "order_id"},
+            {"$inc": {"seq": 1}},
+            return_document=ReturnDocument.AFTER,
+            upsert=True
+        )
+        return doc["seq"]
 
     # ───────────── public API (routes will call) ──────────────────────
     def handle_new_order(self, payload: dict) -> dict:
@@ -84,7 +100,6 @@ class Exchange:
 
         order = self._build_order(req)
         trades: List[Trade] = book.submit(order)
-        # update the orders with their new amounts from the trades
         if (order.order_type is OrderType.GTC) and order.remaining_quantity > 0 and order.cancelled == False:
             self._writer.upsert_live_order(order)
 
@@ -136,9 +151,41 @@ class Exchange:
                 self._writer.record_order(cancelled_order)
             self.log.info("CANCELLED oid=%s", req.order_id)
             return {"status": "CANCELLED", "order_id": req.order_id}
-
         self.log.info("cancel miss oid=%s", req.order_id)
         return {"status": "ERROR", "details": "order not open"}
+
+    def handle_cancel_all(self, payload: dict) -> dict:
+        try:
+            req = CancelAllReq(**payload)
+        except ValidationError as e:
+            return {"status": "ERROR", "details": e.errors()}
+        try:
+            instrument_id = int(payload.get("instrument_id", 0))
+        except ValueError:
+            return {"status": "ERROR", "details": "invalid instrument_id"}
+        book = self._books.get(instrument_id)
+        if not book:
+            return {"status": "ERROR", "details": "unknown instrument"}
+
+        cancelled_ids = []
+        failed_ids = []
+        for oid, order in list(book.oid_map.items()):
+            if order.party_id == req.party_id:
+                first_time = book.cancel(oid)
+                if first_time:
+                    self._writer.record_cancel(req.instrument_id, oid)
+                    self._writer.remove_live_order(
+                        inst=req.instrument_id, order_id=oid
+                    )
+                    self._writer.record_order(order)
+                    cancelled_ids.append(oid)
+                else:
+                    failed_ids.append(oid)
+        return {
+            "status": "CANCELLED_ALL",
+            "cancelled_order_ids": cancelled_ids,
+            "failed_order_ids": failed_ids
+        }
 
     # ───────────── management API  (callable from a POST /new_book) ───
     def create_order_book(self, instrument_id: int) -> dict:
@@ -153,8 +200,6 @@ class Exchange:
 
     # ───────────── internal helpers ───────────────────────────────────
     def _build_order(self, req: NewOrderReq) -> Order:
-        oid = self._next_oid
-        self._next_oid += 1
         return Order(
             order_type=req.order_type,
             side=req.side,
@@ -162,7 +207,7 @@ class Exchange:
             price_cents=req.price_cents,
             quantity=req.quantity,
             timestamp=time_ns(),
-            order_id=oid,
+            order_id=self._get_next_order_id(),
             party_id=req.party_id,
             cancelled=False,
             filled_quantity=0,
@@ -170,15 +215,11 @@ class Exchange:
         )
 
     # ───────────── cold-start rebuild logic ───────────────────────────
-    async def rebuild_from_database(self) -> None:
-        for instr in self._writer.list_instruments():
-            if instr in self._books:
-                self.log.warning("REBUILD-BOOK instrument=%s already exists", instr)
-                continue
-
+    async def rebuild_from_database(self, writer: QueuedDbWriter) -> None:
+        for instr in writer.list_instruments():
             book = OrderBook(instr)
             self._books[instr] = book
-            row_iter = self._writer.iter_orders(instr)  # must be ordered by ts
+            row_iter = writer.iter_orders(instr)
             self.log.info("REBUILD-START instrument=%s", instr)
 
             count_rows = 0
@@ -199,7 +240,5 @@ class Exchange:
                     filled_quantity=row["filled_quantity"]
                 )
                 book.rest_order(order)
-                self._next_oid = max(self._next_oid, row["order_id"] + 1)
                 count_rows += 1
-
             self.log.info("REBUILD-END  instrument=%s rows=%d", instr, count_rows)

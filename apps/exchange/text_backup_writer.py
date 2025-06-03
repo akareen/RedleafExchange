@@ -12,16 +12,6 @@ def remove_live_order(instrument_id: int, order_id: int) -> None:
 
 
 class TextBackupWriter:
-    """
-    An append‐only CSV “event logger.”  For each instrument:
-      • orders_<instr>.csv       (one row per record_order)
-      • trades_<instr>.csv       (one row per record_trade)
-      • cancels_<instr>.csv      (one row per record_cancel)
-      • live_events_<instr>.csv  (one row per upsert_live_order or remove_live_order)
-
-    All writes are scheduled via asyncio.to_thread(...) so as not to block.
-    """
-
     def __init__(self, directory: str = "text_backup"):
         self.base_dir = Path(directory)
         self.base_dir.mkdir(exist_ok=True)
@@ -94,9 +84,6 @@ class TextBackupWriter:
         return None
 
     def create_instrument(self, instrument_id: int) -> None:
-        """
-        Create (if missing) the four CSV files with headers.
-        """
         def _ensure_csv(path: Path, header: List[str]) -> None:
             if not path.exists():
                 with path.open("w", newline="", encoding="utf-8") as fp:
@@ -116,25 +103,16 @@ class TextBackupWriter:
     # ──────── Hot‐path methods (append only) ─────────────────────────────
 
     def record_order(self, order: Order) -> None:
-        """
-        Append one row to orders_<instr>.csv
-        """
         data = order.__dict__
         loop = asyncio.get_event_loop()
         loop.create_task(self._append_order_row(data))
 
     def record_trade(self, trade: Trade) -> None:
-        """
-        Append one row to trades_<instr>.csv
-        """
         data = trade.__dict__
         loop = asyncio.get_event_loop()
         loop.create_task(self._append_trade_row(data))
 
     def record_cancel(self, instrument_id: int, order_id: int) -> None:
-        """
-        Append one row to cancels_<instr>.csv
-        """
         timestamp = int(asyncio.get_event_loop().time() * 1e9)  # use nanosecond timestamp
         row = {
             "instrument_id": instrument_id,
@@ -145,16 +123,12 @@ class TextBackupWriter:
         loop.create_task(self._append_cancel_row(row))
 
     def upsert_live_order(self, order: Order) -> None:
-        """
-        Append one “UPS_LIVE” row to live_events_<instr>.csv
-        """
         data = order.__dict__.copy()
         data["event_type"] = "UPS_LIVE"
         loop = asyncio.get_event_loop()
         loop.create_task(self._append_live_row(data))
 
     # ──────── Internal async helpers ──────────────────────────────────────
-
     async def _append_order_row(self, row: Dict[str, Any]) -> None:
         instr = row["instrument_id"]
         path = self.base_dir / f"orders_{instr}.csv"

@@ -25,3 +25,10 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+def admin_uri() -> str:
+    settings = get_settings()
+    if settings.mongo_user and settings.mongo_pass:
+        return f"mongodb://{settings.mongo_user}:{settings.mongo_pass}@{settings.mongo_host}:{settings.mongo_port}/admin"
+    else:
+        return f"mongodb://{settings.mongo_host}:{settings.mongo_port}/admin"

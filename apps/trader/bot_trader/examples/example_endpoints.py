@@ -2,9 +2,6 @@
 import sys
 import pathlib
 
-# ─────────────────────────────────────────────────────────────────────────
-# Ensure the project root is on Python’s import path so that `apps/...` works.
-# This file lives at: <project-root>/apps/trader/bot_trader/examples/example_endpoints.py
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 # ─────────────────────────────────────────────────────────────────────────

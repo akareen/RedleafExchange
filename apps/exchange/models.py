@@ -54,14 +54,11 @@ class Order:
         )
 
     def __getattribute__(self, name):
-        # Intercept requests for __dict__; build a dict of all dataclass fields,
-        # converting any Enum values into something JSON­-serializable (e.g. .name).
         if name == "__dict__":
             result = {}
             for f in fields(self):
                 val = object.__getattribute__(self, f.name)
                 if isinstance(val, Enum):
-                    # store the enum’s name (or .value if you prefer integers)
                     result[f.name] = val.name
                 else:
                     result[f.name] = val
@@ -98,7 +95,6 @@ class Trade:
             result = {}
             for f in fields(self):
                 val = object.__getattribute__(self, f.name)
-                # No Enums here, but we still build a plain dict for consistency
                 result[f.name] = val
             return result
         return object.__getattribute__(self, name)

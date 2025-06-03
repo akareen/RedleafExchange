@@ -1,0 +1,51 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   TARGET BOTH React-Select v1 (“.Select-…”) and v2+ (“.Select__…”) classnames
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* ------------------------------------------------------------
+   1) “Closed” dropdown box (the control) – dark background + orange text
+   ------------------------------------------------------------ */
+.Select-control,
+.Select__control {
+  background-color: #191919 !important;
+  border: 1px solid #444 !important;
+}
+
+/* The selected‐value (or placeholder) text inside a closed dropdown */
+.Select-value-label,
+.Select__single-value,
+.Select-placeholder {
+  color: #fb8b1e !important;
+}
+
+/* The down-arrow/indicator in the closed dropdown */
+.Select-arrow-zone,
+.Select__dropdown-indicator {
+  color: #fb8b1e !important;
+}
+
+/* ------------------------------------------------------------
+   2) “Open” dropdown menu (when you click it) – dark background + orange text
+   ------------------------------------------------------------ */
+/* The menu container */
+.Select-menu-outer,
+.Select__menu {
+  background-color: #191919 !important;
+  border: 1px solid #444 !important;
+}
+
+/* Each option in the open menu */
+.Select-option,
+.Select__option {
+  background-color: #191919 !important;
+  color: #fb8b1e !important;
+}
+
+/* Highlighted (hover/focus) or selected option */
+.Select-option.is-focused,
+.Select__option--is-focused,
+.Select-option.is-selected,
+.Select__option--is-selected {
+  background-color: rgba(251, 139, 30, 0.2) !important;
+  color: #fb8b1e !important;
+}

@@ -1,49 +1,8 @@
-#!/usr/bin/env python3
-"""
-exchange_dash_app.py  –  Redleaf Exchange Dashboard (Bloomberg‐inspired)
-
-Layout:
-
-┌────────────────────────────────────────────────────────────────────────┐
-│ Banner:  Instrument Name (white) | Description | Last Price (green)  │
-│          | Last Trade Time | LastMaker / LastTaker                  │
-│          | (Created … by …)                                         │
-└────────────────────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────────────────────┐
-│ Order Entry (Party ID, Pwd, Qty, Price, Side, SEND GTC, SEND IOC,      │
-│              Cancel All)                                               │
-└────────────────────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────────────────────┐
-│ Order Book (min 50vh, left)                    │ Price Chart (min 50vh) │
-│ – scrollable table with Bid/Price/Ask levels     └───────────────────────┘
-└────────────────────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────────────────────┐
-│ Recent Trades (min 50vh, scrollable)            │ Open Orders (Me)       │
-│                                                │ – Input (min 10vh)     │
-│                                                │ – Table (min 30vh)     │
-└────────────────────────────────────────────────────────────────────────┘
-
-┌────────────────────────────────────────────────────────────────────────┐
-│ Positions (Everyone) – min 50vh (full width)                            │
-│   Columns: Party | NetQty | NetValue | FirstTradeTime | LastTradeTime  │
-│            | AveragePrice                                           │
-└────────────────────────────────────────────────────────────────────────┘
-
-Place a **favicon.ico** under `./assets/` so Dash serves it.
-
-Run:
-    python exchange_dash_app.py
-"""
+# exchange_dash_app.py  –  Redleaf Exchange Dashboard (Bloomberg‐inspired)
 import os
-import socket
-import threading
 import json
 import datetime
-from collections import defaultdict, deque
-from decimal import Decimal
+from collections import defaultdict
 
 import dash
 import dash_bootstrap_components as dbc
@@ -51,143 +10,48 @@ from dash import html, dcc, dash_table, Input, Output, State, callback_context, 
 import plotly.graph_objects as go
 import requests
 
+from apps.trader.click_trader.exchange_dash_app_utils import dollars, no_dollar, to_cents, format_dt
+
 # ╭──────────────────────────────── CONFIG ─────────────────────────────╮
 API_URL      = os.getenv("API_URL", "http://localhost:8000")
-MCAST_GROUP  = os.getenv("MCAST_GROUP", "224.1.1.1")
-MCAST_PORT   = int(os.getenv("MCAST_PORT", "4445"))
-
-REFRESH_MS   = 500                 # UI refresh interval (ms)
+REFRESH_MS   = 1000               # UI refresh interval (ms)
 MAX_TRADES   = 800                # Keep last N trades in memory
 
-# Heights (viewport units):
-BOOK_H         = "50vh"           # Order Book (minimum)
-PRICE_CH_H     = "50vh"           # Price Chart (minimum)
-TRADES_H       = "50vh"           # Recent Trades (minimum)
-OPEN_INPUT_H   = "10vh"           # Open Orders input row (minimum)
-OPEN_TABLE_H   = "30vh"           # Open Orders scrollable table (minimum)
-POS_H          = "50vh"           # Positions (Everyone) (minimum)
+# Heights:
+BOOK_H        = "50vh"            # Order Book
+PRICE_CH_H    = "40vh"            # Price Chart
+TRADES_H      = "50vh"            # Recent Trades
+OPEN_INPUT_H  = "10vh"            # Open Orders (Me) input
+OPEN_TABLE_H  = "30vh"            # Open Orders (Me) table
+POS_H         = "50vh"            # Positions (Everyone)
 
 # Colors / fonts:
-BG           = "#1f2124"           # Soft dark‐gray background
-ORANGE_TXT   = "#fb8b1e"           # Bloomberg‐orange
-WHITE_TXT    = "#FFFFFF"           # Pure white for instrument name
-LASTP_TXT    = "#00b050"           # Bright green for last price
-BID_BAR      = "rgba(0,176,80,0.35)"   # Semi‐transparent green
-ASK_BAR      = "rgba(230,74,25,0.35)"  # Semi‐transparent red
-BID_FONT     = "#00b050"
-ASK_FONT     = "#e64a19"
-FONT_FAMILY  = "'IBM Plex Mono', monospace"
-CELL_FONT_SZ = "0.75rem"            # Slightly smaller font
-# ╰────────────────────────────────────────────────────────────────────╯
-
-# ────────── Utility functions ─────────────────────────────────────────
-def dollars(cents: int) -> str:
-    return f"${cents/100:,.2f}"
-
-def no_dollar(cents: int) -> str:
-    return f"{cents/100:,.2f}"
-
-def to_cents(txt: str) -> int:
-    """Convert user input like '100.50' → 10050."""
-    return int(Decimal(txt.strip()) * 100)
-
-def format_dt(ts_ns: int) -> str:
-    """
-    Format nanosecond timestamp → 'HH:MM:SS - DD-MM-YYYY'.
-    If invalid, return '--'.
-    """
-    try:
-        dt = datetime.datetime.fromtimestamp(ts_ns / 1e9)
-        return dt.strftime("%H:%M:%S - %d-%m-%Y")
-    except Exception:
-        return "--"
+BG            = "#1f2124"         # Soft dark‐gray background
+ORANGE_TXT    = "#fb8b1e"         # Bloomberg‐orange
+WHITE_TXT     = "#FFFFFF"         # Pure white (instrument name, button text)
+LASTP_TXT     = "#00b050"         # Bright green (last price + numeric stats)
+BID_BAR       = "rgba(0,176,80,0.35)"   # Semi‐transparent green
+ASK_BAR       = "rgba(230,74,25,0.35)"  # Semi‐transparent red
+BID_FONT      = "#00b050"
+ASK_FONT      = "#e64a19"
+FONT_FAMILY   = "'IBM Plex Mono', monospace"
+CELL_FONT_SZ  = "0.75rem"         # Table cell font size
+INPUT_FONT_SZ = "0.9rem"          # Input / dropdown font size
 
 
-# ────────── Initial “cold” load from Mongo ─────────────────────────────
-#   GET /instruments  → must return a list like:
-#     [ { "instrument_id", "instrument_name", "instrument_description",
-#         "created_time", "created_by" }, ... ]
 _instruments = requests.get(f"{API_URL}/instruments").json()
 if not _instruments:
     raise SystemExit("❌ No instruments found. Create at least one via API.")
 
-#   GET /parties  → must return a list like: [ { "party_id", "party_name" }, ... ]
 _parties = {p["party_id"]: p["party_name"] for p in requests.get(f"{API_URL}/parties").json()}
 
 
-# ────────── Shared live state (seed from Mongo, then update via multicast) ──
-class LiveState:
-    book   = defaultdict(lambda: {"bid": defaultdict(int), "ask": defaultdict(int)})
-    trades = defaultdict(lambda: deque(maxlen=MAX_TRADES))
-    lock   = threading.Lock()
-
-LIVE = LiveState()
-
-def bootstrap_book_and_trades(inst_id: int):
-    """
-    On startup, pull from Mongo:
-      • /live_orders/{inst_id} → seed LIVE.book[inst_id]
-      • /trades/{inst_id}      → seed LIVE.trades[inst_id]
-    """
-    try:
-        raw_live = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=3).json()
-        for r in raw_live:
-            side = "bid" if r["side"] == "BUY" else "ask"
-            LIVE.book[inst_id][side][int(r["price_cents"])] += int(r["remaining_quantity"])
-    except Exception:
-        pass
-
-    try:
-        raw_trades = requests.get(f"{API_URL}/trades/{inst_id}", timeout=3).json()
-        for t in sorted(raw_trades, key=lambda x: x["timestamp"]):
-            LIVE.trades[inst_id].append(t)
-    except Exception:
-        pass
-
-for inst in _instruments:
-    bootstrap_book_and_trades(inst["instrument_id"])
-
-
-# ────────── Multicast listener (runs on background thread) ─────────────
-def multicast_listener():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", MCAST_PORT))
-    mreq = socket.inet_aton(MCAST_GROUP) + socket.inet_aton("0.0.0.0")
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-
-    while True:
-        pkt, _ = sock.recvfrom(65536)
-        try:
-            m = json.loads(pkt)
-        except Exception:
-            continue
-        typ = m.get("type")
-        inst = m.get("instrument_id")
-        if typ not in ("ORDER", "TRADE", "CANCEL") or inst is None:
-            continue
-        with LIVE.lock:
-            book = LIVE.book[inst]
-            if typ == "ORDER" and m.get("order_type") == "GTC":
-                side = "bid" if m["side"] == "BUY" else "ask"
-                book[side][int(m["price_cents"])] += int(m["remaining_quantity"])
-            elif typ == "TRADE":
-                LIVE.trades[inst].append(m)
-                px = int(m["price_cents"])
-                q = int(m["quantity"])
-                # Deduct from the resting side:
-                if m["maker_is_buyer"]:
-                    book["bid"][px] = max(book["bid"].get(px, 0) - q, 0)
-                else:
-                    book["ask"][px] = max(book["ask"].get(px, 0) - q, 0)
-            elif typ == "CANCEL":
-                px = m.get("price_cents")
-                side = m.get("side")
-                if px is not None and side:
-                    s = "bid" if side == "BUY" else "ask"
-                    book[s].pop(int(px), None)
-
-threading.Thread(target=multicast_listener, daemon=True).start()
+# ────────── Dash Stores for live data ──────────────────────────────────
+dcc.BookStore       = dcc.Store(id="store-book")
+dcc.TradeStore      = dcc.Store(id="store-trades")
+dcc.OrderIDsStore   = dcc.Store(id="store-order-ids")
+dcc.LastTradeStore  = dcc.Store(id="store-last-trade-ts")
+dcc.OpenStore       = dcc.Store(id="store-open-raw")
 
 
 # ────────── Dash App Setup ─────────────────────────────────────────────
@@ -197,8 +61,6 @@ app = dash.Dash(
     external_stylesheets=[dbc.themes.SLATE],
     suppress_callback_exceptions=True
 )
-
-# Custom favicon (place favicon.ico in ./assets/)
 app.index_string = f"""
 <!DOCTYPE html>
 <html>
@@ -210,14 +72,50 @@ app.index_string = f"""
 {{%css%}}
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;500&display=swap" rel="stylesheet">
 <style>
-  html, body {{
-      margin:0; padding:0;
-      background:{BG};
-      color:{ORANGE_TXT};
-      font-family:{FONT_FAMILY};
+  body {{
+    background:{BG};
+    color:{ORANGE_TXT};
+    font-family:{FONT_FAMILY};
   }}
   .bg-dark   {{ background:{BG} !important; }}
   .text-light{{ color:{ORANGE_TXT} !important; }}
+
+  /* ── Make button text white and prevent overflow ── */
+  .btn {{
+    color: {WHITE_TXT} !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    height: 2.5rem !important;   /* match input height */
+    font-size: {INPUT_FONT_SZ} !important;
+  }}
+
+  /* ── Style all <input> to look like the rest of the theme ── */
+  input {{
+    background-color:{BG} !important;
+    color:{ORANGE_TXT} !important;
+    font-size:{INPUT_FONT_SZ} !important;
+    border:1px solid #444 !important;
+    border-radius:4px !important;
+    padding-left:0.5rem !important;
+    box-sizing: border-box;
+  }}
+  input::placeholder {{
+    color:{ORANGE_TXT} !important;
+  }}
+  input:focus {{
+    outline: none !important;
+    box-shadow: none !important;
+  }}
+
+  /* Remove custom dropdown CSS entirely—let them stay white */
+  /* (No additional rules here for select/react-select) */
+
+  /* Remove default “Updating…” spinner */
+  .dash-loading {{
+    visibility: hidden !important;
+  }}
+
   ::-webkit-scrollbar {{
       width:6px; height:6px;
   }}
@@ -234,19 +132,17 @@ app.index_string = f"""
 """
 
 
-# ────────── Helpers ────────────────────────────────────────────────────
-
+# ────────────────────────────────────────────────────────────────────────
+# ──── Helpers ──────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────
 def dropdown_options():
-    """
-    Build dropdown options for instruments.  Tooltip shows created_by/time + description.
-    """
     opts = []
     for inst in _instruments:
         label = inst["instrument_name"]
         val   = inst["instrument_id"]
         created_by = _parties.get(inst["created_by"], str(inst["created_by"]))
         tip = (
-            f"Created {inst['created_time']} by {created_by}\n"
+            f"Instrument created on {inst['created_time']} by {created_by}\n"
             f"{inst['instrument_description']}"
         )
         opts.append({"label": label, "value": val, "title": tip})
@@ -254,37 +150,28 @@ def dropdown_options():
 
 
 def book_to_rows(bid_dict_raw, ask_dict_raw):
-    """
-    Convert two dicts {price_str:qty, ...} →
-      • rows: [ { "BidQty", "Price", "AskQty" }, … ]
-      • columns: definitions
-      • style_data_conditional: colored bars + alignment
-    """
     bid_int = {int(p): int(q) for p, q in bid_dict_raw.items()}
     ask_int = {int(p): int(q) for p, q in ask_dict_raw.items()}
 
-    prices = set()
-    for px, qty in bid_int.items():
-        if qty > 0:
-            prices.add(px)
-    for px, qty in ask_int.items():
-        if qty > 0:
-            prices.add(px)
+    prices = {px for px, qty in bid_int.items() if qty > 0} | \
+             {px for px, qty in ask_int.items() if qty > 0}
+
     if not prices:
         return [], [], []
 
-    all_prices = sorted(prices)
-    max_bid = max((bid_int.get(px, 0) for px in all_prices), default=1)
-    max_ask = max((ask_int.get(px, 0) for px in all_prices), default=1)
+    all_prices = sorted(prices, reverse=True)
+    max_bid = max(bid_int.get(px, 0) for px in all_prices) or 1
+    max_ask = max(ask_int.get(px, 0) for px in all_prices) or 1
 
     rows = []
     styles = []
     for i, px in enumerate(all_prices):
         bq = bid_int.get(px, 0)
         aq = ask_int.get(px, 0)
+        price_str = f"{(px/100):.2f}"
         rows.append({
             "BidQty": bq if bq > 0 else "",
-            "Price" : no_dollar(px),
+            "Price" : price_str,
             "AskQty": aq if aq > 0 else ""
         })
         if bq > 0:
@@ -308,11 +195,10 @@ def book_to_rows(bid_dict_raw, ask_dict_raw):
             })
 
     columns = [
-        {"name": "BidQty", "id": "BidQty"},
-        {"name": "Price" , "id": "Price"},
-        {"name": "AskQty", "id": "AskQty"},
+        {"name": "Bid Qty",      "id": "BidQty"},
+        {"name": "Price",        "id": "Price"},
+        {"name": "Ask Qty",      "id": "AskQty"},
     ]
-    # Alignments for the three columns:
     styles.append({"if": {"column_id": "BidQty"}, "textAlign": "left"})
     styles.append({"if": {"column_id": "Price"},  "textAlign": "center"})
     styles.append({"if": {"column_id": "AskQty"}, "textAlign": "right"})
@@ -321,22 +207,13 @@ def book_to_rows(bid_dict_raw, ask_dict_raw):
 
 
 def compute_positions(trades):
-    """
-    For each party:
-      • NetQty = (sum of buys) – (sum of sells)
-      • NetValue = signed dollar‐value of net position
-      • FirstTradeTime = timestamp of earliest trade
-      • LastTradeTime  = timestamp of latest trade
-      • AveragePrice = abs(NetValue)/abs(NetQty)
-    Returns rows: [ { "Party", "NetQty", "NetValue", "FirstTradeTime",
-                      "LastTradeTime", "AveragePrice" }, ... ]
-    """
     pos_map = defaultdict(lambda: {
         "qty": 0,
         "value_cents": 0,
         "first_ts": None,
         "last_ts": None
     })
+
     for t in trades:
         maker = int(t["maker_party_id"])
         taker = int(t["taker_party_id"])
@@ -344,15 +221,7 @@ def compute_positions(trades):
         px    = int(t["price_cents"])
         ts    = t["timestamp"]
 
-        # Update first/last timestamps for both maker and taker
-        for pid in (maker, taker):
-            rec = pos_map[pid]
-            if rec["first_ts"] is None or ts < rec["first_ts"]:
-                rec["first_ts"] = ts
-            if rec["last_ts"] is None or ts > rec["last_ts"]:
-                rec["last_ts"] = ts
-
-        # Maker side:
+        # Maker side
         if t["maker_is_buyer"]:
             pos_map[maker]["qty"] += qty
             pos_map[maker]["value_cents"] += px * qty
@@ -360,7 +229,7 @@ def compute_positions(trades):
             pos_map[maker]["qty"] -= qty
             pos_map[maker]["value_cents"] -= px * qty
 
-        # Taker side (opposite):
+        # Taker side (opposite of maker)
         if t["maker_is_buyer"]:
             pos_map[taker]["qty"] -= qty
             pos_map[taker]["value_cents"] -= px * qty
@@ -368,33 +237,35 @@ def compute_positions(trades):
             pos_map[taker]["qty"] += qty
             pos_map[taker]["value_cents"] += px * qty
 
+        for pid in (maker, taker):
+            rec = pos_map[pid]
+            if rec["first_ts"] is None or ts < rec["first_ts"]:
+                rec["first_ts"] = ts
+            if rec["last_ts"] is None or ts > rec["last_ts"]:
+                rec["last_ts"] = ts
+
     rows = []
     for pid, rec in pos_map.items():
         net_qty = rec["qty"]
-        net_val_dollars = rec["value_cents"] / 100
         if net_qty == 0:
             avg_price = 0.0
         else:
             avg_price = abs(rec["value_cents"]) / abs(net_qty) / 100
+        net_value = net_qty * avg_price
         rows.append({
-            "Party"          : _parties.get(pid, str(pid)),
-            "NetQty"         : net_qty,
-            "NetValue"       : f"{net_val_dollars:,.2f}",
-            "FirstTradeTime" : format_dt(rec["first_ts"]),
-            "LastTradeTime"  : format_dt(rec["last_ts"]),
-            "AveragePrice"   : f"{avg_price:,.2f}",
+            "Party"           : _parties.get(pid, str(pid)),
+            "NetQty"          : net_qty,
+            "FirstTradeTime"  : format_dt(rec["first_ts"]),
+            "LastTradeTime"   : format_dt(rec["last_ts"]),
+            "AveragePrice"    : f"{avg_price:,.2f}",
+            "NetValue"        : f"{net_value:,.2f}",
         })
-    # Sort descending by absolute net quantity
+
     rows.sort(key=lambda r: abs(r["NetQty"]), reverse=True)
     return rows
 
 
-def build_table(title, tbl_id, parent_height):
-    """
-    Returns a dbc.Card that is at least parent_height tall,
-    whose DataTable flex‐fills the remainder beneath a 2rem header.
-    Column headers are center-aligned, and the table is forced to scroll if too many rows.
-    """
+def build_table(title, tbl_id, parent_min_height):
     HEADER_H = "2rem"
     return dbc.Card(
         [
@@ -404,7 +275,7 @@ def build_table(title, tbl_id, parent_height):
                 className="bg-dark text-light p-1",
                 style={"height": HEADER_H, "lineHeight": HEADER_H}
             ),
-            # Div that holds the DataTable and makes it fill the remaining height
+            # Div to hold DataTable and let it flex‐fill
             html.Div(
                 dash_table.DataTable(
                     id=tbl_id,
@@ -416,7 +287,7 @@ def build_table(title, tbl_id, parent_height):
                         "fontWeight": "900",
                         "border": "none",
                         "fontSize": CELL_FONT_SZ,
-                        "textAlign": "center",          # ← center-align headers
+                        "textAlign": "center",
                     },
                     style_cell={
                         "backgroundColor": BG,
@@ -427,7 +298,7 @@ def build_table(title, tbl_id, parent_height):
                         "padding": "3px"
                     },
                     style_table={
-                        "maxHeight": "100%",            # ← enforce scroll
+                        "minHeight": "100%",
                         "overflowY": "auto",
                         "backgroundColor": BG,
                     },
@@ -439,56 +310,149 @@ def build_table(title, tbl_id, parent_height):
         style={
             "backgroundColor": BG,
             "border": "none",
-            "minHeight": parent_height,  # ← use minHeight instead of fixed height
+            "minHeight": parent_min_height,
             "display": "flex",
             "flexDirection": "column",
         },
     )
 
 
-# ────────── Build Dash layout ────────────────────────────────────────────
+# ────────── Build Dash layout ───────────────────────────────────────────
 app.layout = dbc.Container(
     [
-        # ── Banner: Instrument Name (white) | Description | Last Price (green), etc.
         html.Div(id="banner", className="mb-2"),
 
-        # ── Order Entry + Cancel All
         dbc.Card(
             dbc.CardBody(
                 dbc.Row(
                     [
+                        # 1) Instrument selector (plain white dropdown)
                         dbc.Col(
                             dcc.Dropdown(
                                 id="dd-instr",
                                 options=dropdown_options(),
                                 value=_instruments[0]["instrument_id"],
+                                searchable=False,
                                 clearable=False,
-                                placeholder="Select Instrument"
+                                placeholder="Select Instrument",
+                                # Remove all custom styling—let default be basic white
+                                style={
+                                    "height": "2.5rem",
+                                    "fontSize": INPUT_FONT_SZ
+                                }
                             ), width=3
                         ),
-                        dbc.Col(dbc.Input(id="in-party", type="number", placeholder="Party ID"), width=1),
-                        dbc.Col(dbc.Input(id="in-pwd", type="password", placeholder="Password"), width=1),
-                        dbc.Col(dbc.Input(id="in-qty", type="number", placeholder="Quantity"), width=1),
-                        dbc.Col(dbc.Input(id="in-price", type="text", placeholder="Price (e.g. 101.23)"), width=1),
+                        # 2) Party ID
                         dbc.Col(
-                            dbc.Select(
-                                id="in-side",
-                                options=[{"label": "BUY", "value": "BUY"},
-                                         {"label": "SELL", "value": "SELL"}],
-                                value="BUY",
+                            dbc.Input(
+                                id="in-party",
+                                type="text",
+                                placeholder="Party ID",
+                                persistence=True,
+                                persistence_type="local",
+                                style={
+                                    "height": "2.5rem",
+                                    "backgroundColor": BG,
+                                    "color": ORANGE_TXT,
+                                    "border": "1px solid #444",
+                                    "borderRadius": "4px",
+                                    "paddingLeft": "0.5rem",
+                                }
+                            ), width=2
+                        ),
+                        # 3) Password
+                        dbc.Col(
+                            dbc.Input(
+                                id="in-pwd",
+                                type="password",
+                                placeholder="Password",
+                                persistence=True,
+                                persistence_type="local",
+                                style={
+                                    "height": "2.5rem",
+                                    "backgroundColor": BG,
+                                    "color": ORANGE_TXT,
+                                    "border": "1px solid #444",
+                                    "borderRadius": "4px",
+                                    "paddingLeft": "0.5rem",
+                                }
+                            ), width=2
+                        ),
+                        # 4) Quantity
+                        dbc.Col(
+                            dbc.Input(
+                                id="in-qty",
+                                type="number",
+                                placeholder="Quantity",
+                                style={
+                                    "height": "2.5rem",
+                                    "backgroundColor": BG,
+                                    "color": ORANGE_TXT,
+                                    "border": "1px solid #444",
+                                    "borderRadius": "4px",
+                                    "paddingLeft": "0.5rem",
+                                }
+                            ), width=2
+                        ),
+                        # 5) Price
+                        dbc.Col(
+                            dbc.Input(
+                                id="in-price",
+                                type="text",
+                                placeholder="Price (e.g. 101.23)",
+                                style={
+                                    "height": "2.5rem",
+                                    "backgroundColor": BG,
+                                    "color": ORANGE_TXT,
+                                    "border": "1px solid #444",
+                                    "borderRadius": "4px",
+                                    "paddingLeft": "0.5rem",
+                                }
+                            ), width=2
+                        ),
+                        # 6) OrderType (GTC/IOC) – plain white dropdown
+                        dbc.Col(
+                            dcc.Dropdown(
+                                id="in-otyp",
+                                options=[
+                                    {"label": "GTC", "value": "GTC"},
+                                    {"label": "IOC", "value": "IOC"}
+                                ],
+                                value="GTC",
+                                searchable=False,
+                                clearable=False,
+                                style={
+                                    "height": "2.5rem",
+                                    "fontSize": INPUT_FONT_SZ
+                                }
+                            ), width=2
+                        ),
+                        # 7) BUY button (green)
+                        dbc.Col(
+                            dbc.Button(
+                                "BUY",
+                                id="btn-buy",
+                                color="success",
+                                style={"width": "100%", "whiteSpace": "nowrap"}
                             ), width=1
                         ),
+                        # 8) SELL button (red)
                         dbc.Col(
-                            dbc.Button("SEND GTC", id="btn-gtc", color="success", size="sm", n_clicks=0),
-                            width=1
+                            dbc.Button(
+                                "SELL",
+                                id="btn-sell",
+                                color="danger",
+                                style={"width": "100%", "whiteSpace": "nowrap"}
+                            ), width=1
                         ),
+                        # 9) Cancel All – wider
                         dbc.Col(
-                            dbc.Button("SEND IOC", id="btn-ioc", color="warning", size="sm", n_clicks=0),
-                            width=1
-                        ),
-                        dbc.Col(
-                            dbc.Button("Cancel All Open Orders", id="btn-cancel-all", color="danger", size="sm"),
-                            width=2
+                            dbc.Button(
+                                "Cancel All Open Orders",
+                                id="btn-cancel-all",
+                                color="dark",
+                                style={"width": "100%", "whiteSpace": "nowrap"}
+                            ), width=3
                         ),
                     ],
                     className="gy-1",
@@ -498,169 +462,249 @@ app.layout = dbc.Container(
             style={"backgroundColor": BG},
         ),
 
-        html.Small(id="lbl-msg", className="mb-2", style={"color": ORANGE_TXT, "fontSize": "0.8rem"}),
+        html.Small(
+            id="lbl-msg",
+            className="mb-2",
+            style={"color": ORANGE_TXT, "fontSize": "0.8rem"}
+        ),
 
-        # ── Row1: Order Book (min 50vh) on Left, Price Chart (min 50vh) on Right ───
+        # ── Row: Order Book (50vh) left │ Price Chart (40vh) right ─────────
         dbc.Row(
             [
-                # Left: Order Book
+                # Left: Order Book (50vh)
                 dbc.Col(
                     html.Div(
-                        build_table("Order Book (prices in cents)", "tbl-book", "100%"),
-                        style={"minHeight": BOOK_H}
-                    ),
-                    width=6
+                        build_table("Order Book (prices in dollars)", "tbl-book", BOOK_H),
+                        style={"minHeight": BOOK_H, "marginBottom": "0.5rem"}
+                    ), width=6
                 ),
 
-                # Right: Price Chart (min 50vh)
+                # Right: Price Chart (40vh)
                 dbc.Col(
                     html.Div(
                         dbc.Card(
                             [
                                 dbc.CardHeader(
-                                    html.Span("Price Chart", style={"fontWeight":"900", "color":ORANGE_TXT}),
+                                    html.Span(
+                                        "Price Chart",
+                                        style={"fontWeight": "900", "color": ORANGE_TXT}
+                                    ),
                                     className="bg-dark text-light p-1",
-                                    style={"height":"2rem", "lineHeight":"2rem"}
+                                    style={"height": "2rem", "lineHeight": "2rem"}
                                 ),
-                                # This div is where the Graph will be injected:
-                                html.Div(id="fig-price-container", style={"height":"calc(100% - 2rem)"})
+                                dcc.Graph(
+                                    id="fig-price",
+                                    style={"height": "100%"}
+                                ),
                             ],
-                            className="shadow mb-2",
+                            className="shadow",
                             style={
                                 "backgroundColor": BG,
                                 "border": "none",
                                 "minHeight": PRICE_CH_H
                             },
                         ),
-                        style={"marginBottom":"0.5rem"}
-                    ),
-                    width=6
+                        style={"marginBottom": "0.5rem"}
+                    ), width=6
                 ),
             ],
             className="gx-2 mb-2",
         ),
 
-        # ── Row2: Recent Trades (min 50vh) on Left, Open Orders (Me) (min 50vh) on Right ──
+        # ── Row: Recent Trades (50vh) │ Open Orders (Me: input 10vh + table 30vh) ─
         dbc.Row(
             [
-                # Left: Recent Trades
+                # Left: Recent Trades (50vh)
                 dbc.Col(
                     html.Div(
-                        build_table("Recent Trades", "tbl-trades", "100%"),
-                        style={"minHeight": TRADES_H}
-                    ),
-                    width=6
+                        build_table("Recent Trades", "tbl-trades", TRADES_H),
+                        style={"minHeight": TRADES_H, "marginBottom": "0.5rem"}
+                    ), width=6
                 ),
 
-                # Right: Open Orders (Me) (min 50vh total)
+                # Right: Open Orders (Me)
                 dbc.Col(
                     html.Div(
-                        [
-                            # Card container
-                            dbc.Card(
-                                [
-                                    # Header
-                                    dbc.CardHeader(
-                                        html.Span("Open Orders (Me)", style={"fontWeight": "900", "color": ORANGE_TXT}),
-                                        className="bg-dark text-light p-1",
-                                        style={"height": "2rem", "lineHeight": "2rem"}
+                        dbc.Card(
+                            [
+                                # Header
+                                dbc.CardHeader(
+                                    html.Span(
+                                        "Open Orders (Me)",
+                                        style={"fontWeight": "900", "color": ORANGE_TXT}
                                     ),
-                                    # Input area (min 10vh)
-                                    html.Div(
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(dbc.Input(id="o_party", type="number", placeholder="Party ID"), width=3),
-                                                dbc.Col(dbc.Input(id="o_pwd", type="password", placeholder="Password"), width=3),
-                                                dbc.Col(dbc.Button("Fetch My Orders", id="btn-fetch-open", color="primary", size="sm"), width=3),
-                                                html.Div(id="open-msg", style={"color": ORANGE_TXT, "fontSize": "0.75rem"}),
-                                            ],
-                                            className="gx-1",
-                                            style={"minHeight": OPEN_INPUT_H, "padding": "0.25rem"}
-                                        ),
-                                        style={"minHeight": OPEN_INPUT_H}
+                                    className="bg-dark text-light p-1",
+                                    style={"height": "2rem", "lineHeight": "2rem"}
+                                ),
+                                # Input row (10vh)
+                                html.Div(
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                dbc.Input(
+                                                    id="o_party",
+                                                    type="text",
+                                                    placeholder="Party ID",
+                                                    persistence=True,
+                                                    persistence_type="local",
+                                                    style={
+                                                        "height": "2.5rem",
+                                                        "backgroundColor": BG,
+                                                        "color": ORANGE_TXT,
+                                                        "border": "1px solid #444",
+                                                        "borderRadius": "4px",
+                                                        "paddingLeft": "0.5rem",
+                                                    }
+                                                ), width=4
+                                            ),
+                                            dbc.Col(
+                                                dbc.Input(
+                                                    id="o_pwd",
+                                                    type="password",
+                                                    placeholder="Password",
+                                                    persistence=True,
+                                                    persistence_type="local",
+                                                    style={
+                                                        "height": "2.5rem",
+                                                        "backgroundColor": BG,
+                                                        "color": ORANGE_TXT,
+                                                        "border": "1px solid #444",
+                                                        "borderRadius": "4px",
+                                                        "paddingLeft": "0.5rem",
+                                                    }
+                                                ), width=4
+                                            ),
+                                            dbc.Col(
+                                                dbc.Button(
+                                                    "Fetch My Orders",
+                                                    id="btn-fetch-open",
+                                                    color="primary",
+                                                    style={"width": "100%", "whiteSpace": "nowrap"}
+                                                ), width=4
+                                            ),
+                                        ],
+                                        className="gy-1 px-2",
+                                        style={"height": OPEN_INPUT_H}
                                     ),
-                                    # Table area (min 30vh, scrollable, but can grow)
-                                    html.Div(
-                                        id="open-orders-table",
-                                        style={
-                                            "minHeight": OPEN_TABLE_H,
-                                            "overflowY": "auto",
-                                            "padding": "0.25rem"
-                                        }
-                                    ),
-                                ],
-                                className="shadow",
-                                style={
-                                    "backgroundColor": BG,
-                                    "border": "none",
-                                    "display": "flex",
-                                    "flexDirection": "column",
-                                    "minHeight": "100%"
-                                },
-                            )
-                        ],
-                        style={"minHeight": TRADES_H}  # same as Recent Trades
-                    ),
-                    width=6
+                                    style={"minHeight": OPEN_INPUT_H, "paddingTop": "0.5rem"}
+                                ),
+                                # Table (30vh, scrollable)
+                                html.Div(
+                                    id="open-orders-table",
+                                    style={
+                                        "minHeight": OPEN_TABLE_H,
+                                        "overflowY": "auto",
+                                        "padding": "0.25rem"
+                                    }
+                                ),
+                            ],
+                            className="shadow",
+                            style={
+                                "backgroundColor": BG,
+                                "border": "none",
+                                "display": "flex",
+                                "flexDirection": "column",
+                            },
+                        )
+                    ), width=6
                 ),
             ],
             className="gx-2 mb-2",
         ),
 
-        # ── Row3: Positions (Everyone) – min 50vh full width ────────────────
+        # ── Row: Positions (Everyone) (50vh, full width) ───────────────────
         dbc.Row(
             [
                 dbc.Col(
                     html.Div(
-                        build_table("Positions (Everyone)", "tbl-pos", "100%"),
+                        build_table("Positions (Everyone)", "tbl-pos", POS_H),
                         style={"minHeight": POS_H}
                     ),
                     width=12
-                ),
+                )
             ],
             className="gx-2 mb-2",
         ),
 
-        # Hidden Stores + Interval
+        # ── Hidden Stores + Interval ───────────────────────────────────────
         dcc.Interval(id="tick", interval=REFRESH_MS),
-        dcc.Store(id="store-book"),
-        dcc.Store(id="store-trades"),
-        dcc.Store(id="store-open-raw"),
+        dcc.BookStore,
+        dcc.TradeStore,
+        dcc.OrderIDsStore,
+        dcc.LastTradeStore,
+        dcc.OpenStore,
     ],
     fluid=True,
-    className="p-2",
+    className="pt-2",
 )
 
 
 # ─────────── Callbacks ──────────────────────────────────────────────────
 
-# 1) Periodically push LIVE.book & LIVE.trades into dcc.Stores
+# 1) Every REFRESH_MS or when instrument changes, fetch from Mongo:
+#    • /live_orders/{inst_id} → rebuild book & extract sorted order_ids
+#    • /trades/{inst_id}      → retrieve all trades & extract last timestamp
+#    Compare just order-IDs and last-trade-ts to decide if downstream updates fire.
 @app.callback(
     Output("store-book", "data"),
     Output("store-trades", "data"),
+    Output("store-order-ids", "data"),
+    Output("store-last-trade-ts", "data"),
     Input("tick", "n_intervals"),
-    State("dd-instr", "value"),
+    Input("dd-instr", "value"),
+    State("store-order-ids", "data"),
+    State("store-last-trade-ts", "data"),
 )
-def update_live_data(_, inst_id):
-    with LIVE.lock:
-        book = LIVE.book[inst_id]
-        trades = list(LIVE.trades[inst_id])
-    return book, trades
+def update_live_data(n_intervals, inst_id, old_order_ids, old_last_trade_ts):
+    # Fetch live orders
+    try:
+        raw_live = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=2).json()
+    except Exception:
+        raw_live = []
+    new_book = {"bid": defaultdict(int), "ask": defaultdict(int)}
+    new_order_ids = []
+    for r in raw_live:
+        side_key = "bid" if r["side"] == "BUY" else "ask"
+        px = int(r["price_cents"])
+        qty = int(r["remaining_quantity"])
+        new_book[side_key][px] += qty
+        new_order_ids.append(r["order_id"])
+    new_order_ids.sort()
+
+    # Fetch trades
+    try:
+        raw_trades = requests.get(f"{API_URL}/trades/{inst_id}", timeout=2).json()
+    except Exception:
+        raw_trades = []
+    sorted_trades = sorted(raw_trades, key=lambda x: x["timestamp"])
+    if len(sorted_trades) > MAX_TRADES:
+        sorted_trades = sorted_trades[-MAX_TRADES:]
+    new_last_trade_ts = sorted_trades[-1]["timestamp"] if sorted_trades else None
+
+    # Compare only order‐IDs & last_trade_ts
+    if old_order_ids is not None and old_last_trade_ts is not None:
+        if old_order_ids == new_order_ids and old_last_trade_ts == new_last_trade_ts:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+    # Otherwise return all four Stores
+    return new_book, sorted_trades, new_order_ids, new_last_trade_ts
 
 
-# 2) Render the top Banner (Instrument info + Last Price + LastMaker/LastTaker)
+# 2) Render the top Banner (Instrument info + Last Price + Stats)
 @app.callback(
     Output("banner", "children"),
     Input("store-trades", "data"),
+    Input("store-book", "data"),
     State("dd-instr", "value"),
 )
-def render_banner(trades, inst_id):
+def render_banner(trades, book_data, inst_id):
     info = next((x for x in _instruments if x["instrument_id"] == inst_id), {})
     name = info.get("instrument_name", "")
     desc = info.get("instrument_description", "")
     created_by = _parties.get(info.get("created_by"), str(info.get("created_by")))
     created_time = info.get("created_time", "")
 
+    # Last trade
     last = trades[-1] if trades else {}
     lp_cs = int(last.get("price_cents", 0)) if last else 0
     last_price = dollars(lp_cs) if trades else "--"
@@ -668,30 +712,84 @@ def render_banner(trades, inst_id):
     last_maker = _parties.get(last.get("maker_party_id"), str(last.get("maker_party_id")))
     last_taker = _parties.get(last.get("taker_party_id"), str(last.get("taker_party_id")))
 
-    return dbc.Alert(
-        children=[
-            # Instrument Name (white)
-            html.Span(f"{name}", style={"fontWeight": "900", "color": WHITE_TXT, "marginRight": "1rem"}),
-            # Description (orange italic)
-            html.Span(f"{desc}", style={"fontStyle": "italic", "fontSize": "0.9rem", "color": ORANGE_TXT}),
-            # Last Price (green)
-            html.Span(f"  | Last Price: ", style={"marginLeft": "2rem", "fontWeight": "500", "color": ORANGE_TXT}),
-            html.Span(last_price, style={"color": LASTP_TXT, "fontWeight": "bold"}),
-            html.Span(f" @ {last_time}", style={"marginLeft": "0.5rem", "color": ORANGE_TXT}),
-            # Maker/Taker (small orange)
-            html.Div(
-                f" LastMaker: {last_maker}  |  LastTaker: {last_taker}",
-                style={"fontSize": "0.85rem", "marginTop": "4px", "color": ORANGE_TXT},
+    # Open Interest = sum of all quantities in book
+    bid_sum = sum(book_data["bid"].values()) if book_data else 0
+    ask_sum = sum(book_data["ask"].values()) if book_data else 0
+    open_interest = bid_sum + ask_sum
+
+    total_volume = sum(int(t["quantity"]) for t in trades)
+    total_value_cents = sum(int(t["quantity"]) * int(t["price_cents"]) for t in trades)
+    total_value = total_value_cents / 100
+
+    return dbc.Card(
+        [
+            # ── Top row: Name (white) | Desc (orange italic) | Last Price (green) | ...
+            dbc.CardBody(
+                [
+                    html.Span(
+                        f"{name}",
+                        style={"fontWeight": "900", "color": WHITE_TXT, "fontSize": "1.25rem"}
+                    ),
+                    html.Span(
+                        f"{desc}",
+                        style={"fontStyle": "italic", "fontSize": "0.9rem", "color": ORANGE_TXT, "marginLeft": "1rem"}
+                    ),
+                    html.Span(
+                        f"  | Last Price: ",
+                        style={"marginLeft": "2rem", "fontWeight": "500", "color": ORANGE_TXT}
+                    ),
+                    html.Span(
+                        last_price,
+                        style={"color": LASTP_TXT, "fontWeight": "bold", "fontSize": "1.1rem"}
+                    ),
+                    html.Span(
+                        f" @ {last_time}",
+                        style={"marginLeft": "0.5rem", "color": ORANGE_TXT}
+                    ),
+                    html.Div(
+                        f"  LastMaker: {last_maker}  | LastTaker: {last_taker}",
+                        style={"fontSize": "0.85rem", "marginTop": "6px", "color": ORANGE_TXT},
+                    ),
+                    html.Div(
+                        f"Instrument created by {created_by} on {created_time}",
+                        style={"fontSize": "0.75rem", "marginTop": "2px", "color": ORANGE_TXT},
+                    ),
+                ],
+                style={"paddingBottom": "0.25rem"}
             ),
-            # Created info (gray)
-            html.Div(
-                f"(Created {created_time} by {created_by})",
-                style={"fontSize": "0.75rem", "marginTop": "2px", "color": "#888888"},
-            ),
+            # ── Bottom row: Open Interest / Volume / Value
+            dbc.CardBody(
+                [
+                    html.Span(
+                        "Open Interest: ",
+                        style={"fontWeight": "500", "color": ORANGE_TXT, "fontSize": "0.9rem"}
+                    ),
+                    html.Span(
+                        f"{open_interest}",
+                        style={"color": LASTP_TXT, "fontWeight": "500", "fontSize": "0.9rem"}
+                    ),
+                    html.Span(
+                        "  | Total Volume Traded: ",
+                        style={"marginLeft": "2rem", "fontWeight": "500", "color": ORANGE_TXT, "fontSize": "0.9rem"}
+                    ),
+                    html.Span(
+                        f"{total_volume}",
+                        style={"color": LASTP_TXT, "fontWeight": "500", "fontSize": "0.9rem"}
+                    ),
+                    html.Span(
+                        "  | Total Value Traded: ",
+                        style={"marginLeft": "2rem", "fontWeight": "500", "color": ORANGE_TXT, "fontSize": "0.9rem"}
+                    ),
+                    html.Span(
+                        f"{dollars(int(total_value * 100))}",
+                        style={"color": LASTP_TXT, "fontWeight": "500", "fontSize": "0.9rem"}
+                    ),
+                ],
+                style={"borderTop": "1px solid #444", "paddingTop": "0.25rem"}
+            )
         ],
-        color="dark",
-        className="py-1 px-2",
-        style={"backgroundColor": BG, "border": "1px solid #444"},
+        className="shadow mb-2",
+        style={"backgroundColor": BG, "padding": "0.5rem"}
     )
 
 
@@ -711,23 +809,22 @@ def render_book(book_data):
     return rows, cols, styles
 
 
-# 4) Render Recent Trades & inject Price Chart
+# 4) Render Recent Trades & Price Chart
 @app.callback(
     Output("tbl-trades", "data"),
     Output("tbl-trades", "columns"),
-    Output("fig-price-container", "children"),
+    Output("fig-price", "figure"),
     Input("store-trades", "data"),
 )
 def render_trades_and_chart(trades_data):
-    # Build Recent Trades rows
-    trade_rows = []
+    rows = []
     xs, ys = [], []
-    for t in trades_data[-MAX_TRADES:]:
+    for t in reversed(trades_data or []):
         ts_str = format_dt(t["timestamp"])
         px    = int(t["price_cents"])
         qty   = int(t["quantity"])
         total = (px * qty) / 100  # in dollars
-        trade_rows.append({
+        rows.append({
             "Time"  : ts_str,
             "Price" : no_dollar(px),
             "Qty"   : qty,
@@ -747,18 +844,19 @@ def render_trades_and_chart(trades_data):
         {"name": "Taker", "id": "Taker"},
     ]
 
-    # Build Price Chart
     fig = go.Figure()
     if xs and ys:
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Price", line=dict(color=LASTP_TXT)))
+        fig.add_trace(
+            go.Scatter(
+                x=xs, y=ys, mode="lines", name="Price",
+                line=dict(color=LASTP_TXT)
+            )
+        )
         if len(ys) >= 20:
             ma = [sum(ys[i - 19:i + 1]) / 20 for i in range(19, len(ys))]
             fig.add_trace(
                 go.Scatter(
-                    x=xs[19:],
-                    y=ma,
-                    mode="lines",
-                    name="20-MA",
+                    x=xs[19:], y=ma, mode="lines", name="20-MA",
                     line=dict(width=1, dash="dot", color="#888888"),
                 )
             )
@@ -770,19 +868,13 @@ def render_trades_and_chart(trades_data):
         font=dict(family=FONT_FAMILY, color=ORANGE_TXT),
     )
 
-    # Inject the Graph into the <div id="fig-price-container">
-    graph_div = html.Div(
-        dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height": "100%"}),
-        style={"height": "100%"}
-    )
-
-    return trade_rows, trade_cols, graph_div
+    return rows, trade_cols, fig
 
 
 # 5) Fetch “Open Orders (Me)” on button click
 @app.callback(
     Output("store-open-raw", "data"),
-    Output("open-msg", "children"),
+    Output("lbl-msg", "children"),
     Input("btn-fetch-open", "n_clicks"),
     State("o_party", "value"),
     State("o_pwd", "value"),
@@ -792,11 +884,12 @@ def fetch_open_orders(nc, pid, pwd, inst_id):
     if not nc:
         return dash.no_update, dash.no_update
     if pid is None or pwd is None:
-        return dash.no_update, "⚠ Enter Party ID & Password"
+        return dash.no_update, "fetch_open_orders: ⚠ Enter Party ID & Password"
     try:
         raw = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=3).json()
     except Exception as e:
-        return dash.no_update, f"❌ Network error: {e}"
+        return dash.no_update, f"fetch_open_orders: Network Error: {e}"
+
     mine = [r for r in raw if int(r["party_id"]) == int(pid)]
     rows = []
     for r in sorted(mine, key=lambda x: x["order_id"]):
@@ -816,34 +909,41 @@ def fetch_open_orders(nc, pid, pwd, inst_id):
 )
 def render_open_table(open_rows):
     if not open_rows:
-        return html.Div("No open orders or not fetched yet.", style={"color": ORANGE_TXT, "fontSize": "0.75rem"})
-    # Build an HTML table manually so we can embed a Button in each row
+        return html.Div(
+            "No open orders or not fetched yet.",
+            style={"color": ORANGE_TXT, "fontSize": "0.75rem"}
+        )
+
     header = html.Tr([
-        html.Th("OID",   style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Side",  style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Price", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Qty",   style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
-        html.Th("Action",style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("OID",    style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Side",   style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Price",  style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Qty",    style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
+        html.Th("Action", style={"color": ORANGE_TXT, "fontWeight": "900", "textAlign": "center", "fontSize": CELL_FONT_SZ}),
     ])
+
     rows = []
     for r in open_rows:
         oid = r["OID"]
         rows.append(
             html.Tr([
-                html.Td(oid,   style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
-                html.Td(r["Side"],  style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
-                html.Td(r["Price"], style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
-                html.Td(r["Qty"],   style={"textAlign": "center", "fontSize": CELL_FONT_SZ}),
+                html.Td(oid,    style={"textAlign": "center", "fontSize": CELL_FONT_SZ, "color": ORANGE_TXT}),
+                html.Td(r["Side"],  style={"textAlign": "center", "fontSize": CELL_FONT_SZ, "color": ORANGE_TXT}),
+                html.Td(r["Price"], style={"textAlign": "center", "fontSize": CELL_FONT_SZ, "color": ORANGE_TXT}),
+                html.Td(r["Qty"],   style={"textAlign": "center", "fontSize": CELL_FONT_SZ, "color": ORANGE_TXT}),
                 html.Td(
                     dbc.Button(
                         "Cancel",
                         id={"type": "cancel-open", "index": oid},
-                        color="danger", size="sm", n_clicks=0
+                        color="danger", size="sm",
+                        style={"height": "2rem", "fontSize": CELL_FONT_SZ, "whiteSpace": "nowrap"},
+                        n_clicks=0
                     ),
                     style={"textAlign": "center"}
                 ),
             ])
         )
+
     table = html.Table(
         [html.Thead(header)] + [html.Tbody(rows)],
         style={"width": "100%", "borderSpacing": "0", "tableLayout": "fixed"}
@@ -865,11 +965,19 @@ def cancel_open(n_clicks_list, open_rows, pid, pwd, inst_id):
     ctx = callback_context.triggered
     if not ctx:
         return dash.no_update
-    triggered_id = ctx[0]["prop_id"].split(".")[0]
-    triggered_id = json.loads(triggered_id)
-    oid_clicked  = triggered_id["index"]
+    if not ctx:
+        return dash.no_update
+        # Determine which “Cancel” button actually fired
+    triggered = ctx[0]
+    btn_id = json.loads(triggered["prop_id"].split(".")[0])
+    button_n = triggered["value"]  # n_clicks for that specific button
+
+    # If n_clicks is zero or None, this was not a real “click”
+    if not button_n:
+        return dash.no_update
+    oid_clicked  = btn_id["index"]
     if pid is None or pwd is None:
-        return "⚠ Need Party ID & Password to cancel"
+        return "cancel_open: ⚠ Need Party ID & Password to cancel"
     payload = {
         "instrument_id": inst_id,
         "order_id"     : oid_clicked,
@@ -879,73 +987,66 @@ def cancel_open(n_clicks_list, open_rows, pid, pwd, inst_id):
     try:
         resp = requests.post(f"{API_URL}/cancel", json=payload, timeout=4).json()
     except Exception as e:
-        return f"❌ Network Error: {e}"
+        return f"cancel_open: ❌ Network Error: {e}"
     if resp.get("status") == "CANCELLED":
         return "✓ Order Cancelled"
     else:
         detail = resp.get("details", resp)
-        return f"❌ {detail}"
+        return f"cancel_open: ❌ {detail}"
 
 
 # 8) Cancel All Open Orders for My Party
 @app.callback(
     Output("lbl-msg", "children", allow_duplicate=True),
     Input("btn-cancel-all", "n_clicks"),
-    State("store-open-raw", "data"),
     State("o_party", "value"),
     State("o_pwd", "value"),
     State("dd-instr", "value"),
     prevent_initial_call=True,
 )
-def cancel_all(nc, open_rows, pid, pwd, inst_id):
-    if not nc or not open_rows or pid is None or pwd is None:
-        return dash.no_update
+def cancel_all(nc, pid, pwd, inst_id):
+    if not nc or pid is None or pwd is None:
+        return dash.no_update, dash.no_update
     errs = []
-    for r in open_rows:
-        oid = r["OID"]
-        payload = {
-            "instrument_id": inst_id,
-            "order_id"     : oid,
-            "party_id"     : pid,
-            "password"     : pwd,
-        }
-        try:
-            resp = requests.post(f"{API_URL}/cancel", json=payload, timeout=4).json()
-            if resp.get("status") != "CANCELLED":
-                errs.append(str(resp.get("details", resp)))
-        except Exception as e:
-            errs.append(str(e))
-    if errs:
-        return f"❌ Some cancels failed: {'; '.join(errs)}"
-    return "✓ All orders cancelled"
+    payload = {
+        "instrument_id": inst_id,
+        "party_id"     : pid,
+        "password"     : pwd,
+    }
+    try:
+        resp = requests.post(f"{API_URL}/cancel_all", json=payload, timeout=4).json()
+    except Exception as e:
+        return f"cancel_all: ❌ Some cancels failed: {'; '.join(errs)}"
+    return f"✓ All orders cancelled: {resp}"
 
 
-# 9) Send New Order (GTC or IOC)
+# 9) Send New Order (BUY or SELL)
 @app.callback(
     Output("lbl-msg", "children", allow_duplicate=True),
-    Input("btn-gtc", "n_clicks"),
-    Input("btn-ioc", "n_clicks"),
+    Input("btn-buy", "n_clicks"),
+    Input("btn-sell", "n_clicks"),
     State("dd-instr", "value"),
     State("in-party", "value"),
     State("in-pwd", "value"),
     State("in-qty", "value"),
     State("in-price", "value"),
-    State("in-side", "value"),
+    State("in-otyp", "value"),
     prevent_initial_call=True,
 )
-def send_new_order(n_gtc, n_ioc, inst_id, pid, pwd, qty, price_txt, side):
+def send_new_order(n_buy, n_sell, inst_id, pid, pwd, qty, price_txt, otype):
     ctx = callback_context.triggered[0]["prop_id"].split(".")[0]
-    typ = "GTC" if ctx == "btn-gtc" else "IOC"
-    if None in (pid, pwd, qty, price_txt):
-        return "⚠ Please fill Party ID, Password, Qty & Price"
+    side = "BUY" if ctx == "btn-buy" else "SELL"
+
+    if None in (pid, pwd, qty, price_txt, otype):
+        return "send_new_order: ⚠ Please fill Party ID, Password, Qty, Price & OrderType"
     try:
         px_cs = to_cents(price_txt)
     except Exception:
-        return "⚠ Bad price format (e.g. 101.23)"
+        return "send_new_order: ⚠ Bad price format (e.g. 101.23)"
     payload = {
         "instrument_id": inst_id,
         "side"         : side,
-        "order_type"   : typ,
+        "order_type"   : otype,
         "quantity"     : int(qty),
         "price_cents"  : px_cs,
         "party_id"     : int(pid),
@@ -954,12 +1055,12 @@ def send_new_order(n_gtc, n_ioc, inst_id, pid, pwd, qty, price_txt, side):
     try:
         resp = requests.post(f"{API_URL}/orders", json=payload, timeout=4).json()
     except Exception as e:
-        return f"❌ Network Error: {e}"
+        return f"send_new_order: ❌ Network Error: {e}"
     if resp.get("status") == "ACCEPTED":
         return "✓ Order Accepted"
     else:
         detail = resp.get("details", resp)
-        return f"❌ {detail}"
+        return f"send_new_order: ❌ {detail}"
 
 
 # 10) Render Positions (Everyone)
@@ -972,11 +1073,11 @@ def render_positions(trades_data):
     rows = compute_positions(trades_data)
     cols = [
         {"name": "Party"          , "id": "Party"},
-        {"name": "NetQty"         , "id": "NetQty"},
-        {"name": "NetValue"       , "id": "NetValue"},
+        {"name": "Net Qty"        , "id": "NetQty"},
         {"name": "FirstTradeTime" , "id": "FirstTradeTime"},
         {"name": "LastTradeTime"  , "id": "LastTradeTime"},
         {"name": "AveragePrice"   , "id": "AveragePrice"},
+        {"name": "NetValue"       , "id": "NetValue"},
     ]
     return rows, cols
 

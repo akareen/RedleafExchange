@@ -11,10 +11,6 @@ log = logging.getLogger("PartyAuth")
 
 
 def _build_auth_uri(db_name: str) -> str:
-    """
-    Build a MongoDB URI that includes credentials if provided.
-    Otherwise, connect without auth.
-    """
     if SET.mongo_user and SET.mongo_pass:
         user = SET.mongo_user
         pw   = SET.mongo_pass
@@ -27,11 +23,6 @@ def _build_auth_uri(db_name: str) -> str:
 
 
 class MongoPartyAuth:
-    """
-    Verifies party credentials against a MongoDB 'parties' collection.
-    Passwords are stored as bcrypt hashes in the "password" field.
-    """
-
     _cache: dict[int, str] | None = None
 
     @classmethod
@@ -39,7 +30,6 @@ class MongoPartyAuth:
         if cls._cache is not None:
             return
 
-        # Use the same settings (with credentials if configured)
         uri = _build_auth_uri(SET.mongo_db)
         client = AsyncIOMotorClient(uri)
         collection = client[SET.mongo_db]["parties"]
@@ -62,9 +52,6 @@ class MongoPartyAuth:
 
     @classmethod
     async def verify(cls, party_id: int, password: str) -> bool:
-        """
-        Verify that the provided plaintext password matches the stored bcrypt hash.
-        """
         await cls._load()
 
         stored_hash = cls._cache.get(party_id)
@@ -76,7 +63,6 @@ class MongoPartyAuth:
                 log.error("Invalid bcrypt hash for party_id %d: %s", party_id, e)
                 return False
 
-        # Not in cache → fetch directly from Mongo
         log.info("Party %d not in cache; querying MongoDB", party_id)
         uri = _build_auth_uri(SET.mongo_db)
         client = AsyncIOMotorClient(uri)
@@ -97,9 +83,8 @@ class MongoPartyAuth:
                     client.close()
                     return False
             else:
-                pwd_hash = pwd_hash  # it's already str
+                pwd_hash = pwd_hash
 
-            # Cache it
             if cls._cache is not None:
                 cls._cache[party_id] = pwd_hash
 
@@ -118,10 +103,6 @@ class MongoPartyAuth:
 
     @classmethod
     async def get(cls, party_id: int) -> dict | None:
-        """
-        Fetch the full party document (minus Mongo's _id) from the "parties" collection.
-        Returns None if not found.
-        """
         uri = _build_auth_uri(SET.mongo_db)
         client = AsyncIOMotorClient(uri)
         collection = client[SET.mongo_db]["parties"]
@@ -135,32 +116,26 @@ class MongoPartyAuth:
 
 
 class Auth:
-    """
-    FastAPI dependency that checks:
-      1) party_id/password are valid via MongoPartyAuth.verify(...)
-      2) Fetches the party document via MongoPartyAuth.get(...)
-      3) If require_admin=True, verifies party_doc['is_admin'] == True
-
-    On success, returns only the JSON payload (so your route can call
-    ex.create_order_book(payload["instrument_id"]) or similar).
-    On failure, raises HTTPException(401 or 403).
-    """
-
     def __init__(self, require_admin: bool = False):
         self.require_admin = require_admin
 
     async def __call__(self, request: Request, payload: dict = Body(...)) -> dict:
-        pid = payload.get("party_id")
+        raw = payload.get("party_id")
+        try:
+            pid = int(raw) if raw is not None else 0
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="party_id must be an integer"
+            )
         pwd = payload.get("password", "")
 
-        # 1) Verify credentials
         if not await MongoPartyAuth.verify(pid, pwd):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid party_id / password"
             )
 
-        # 2) Fetch full party_doc
         party_doc = await MongoPartyAuth.get(pid)
         if not party_doc:
             raise HTTPException(
@@ -168,15 +143,11 @@ class Auth:
                 detail="party not found"
             )
 
-        # 3) If this endpoint requires admin, enforce that
         if self.require_admin and not party_doc.get("is_admin", False):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="admin privileges required"
             )
 
-        # 4) Stash party_doc on request.state so handlers can read it if needed
         request.state.party = party_doc
-
-        # 5) Return the payload dict (JSON body) onward to the actual route
         return payload

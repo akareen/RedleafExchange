@@ -31,7 +31,6 @@ class PriceLevel:
 
 
 class PriceHeap:
-    """min-heap for asks; max-heap for bids via negative prices."""
     def __init__(self, is_bid: bool):
         self.is_bid = is_bid
         self.h: list[int] = []

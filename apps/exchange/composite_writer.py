@@ -11,11 +11,8 @@ class CompositeWriter:
 
     def __getattr__(self, name):
         def _wrapper(*args, **kwargs):
-            # 1) Call the method on the first writer and capture its return value
             result = getattr(self.writers[0], name)(*args, **kwargs)
-            # 2) Fan out to any additional writers (ignore their return values)
             for w in self.writers[1:]:
                 getattr(w, name)(*args, **kwargs)
-            # 3) Return the result from the first writer
             return result
         return _wrapper
