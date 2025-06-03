@@ -138,7 +138,7 @@ class APIFullIntegration(unittest.TestCase):
             order_type="GTC",
             price_cents=10500,
             quantity=5,
-            party_id=1,
+            party_id="Adam",
             password=PWD
         )
         ask_resp = self.client.post("/orders", json=ask_payload)
@@ -158,7 +158,7 @@ class APIFullIntegration(unittest.TestCase):
             order_type="GTC",
             price_cents=11000,
             quantity=3,
-            party_id=2,
+            party_id="Adam",
             password=PWD
         )
         bid_resp = self.client.post("/orders", json=bid_payload)
@@ -173,7 +173,7 @@ class APIFullIntegration(unittest.TestCase):
         self.assertEqual(len(self.writer.trades), 1)
 
         # Step 3: cancel residual ASK (2 shares left)
-        cancel_resp = self.client.post("/cancel", json={"instrument_id": 1, "order_id": ask_id, "party_id":99, "password":PWD})
+        cancel_resp = self.client.post("/cancel", json={"instrument_id": 1, "order_id": ask_id, "party_id":"Adam", "password":PWD})
         self.assertEqual(cancel_resp.status_code, 200)
         cancelj = cancel_resp.json()
         self.assertEqual(cancelj.get("status"), "CANCELLED")
@@ -191,7 +191,7 @@ class APIFullIntegration(unittest.TestCase):
                 order_type="GTC",
                 price_cents=px,
                 quantity=qty,
-                party_id=9,
+                party_id="Adam",
                 password=PWD
             )
             r = self.client.post("/orders", json=payload)
@@ -203,7 +203,7 @@ class APIFullIntegration(unittest.TestCase):
             side="BUY",
             order_type="MARKET",
             quantity=4,
-            party_id=77,
+            party_id="Adam",
             password=PWD
         )
         mktr = self.client.post("/orders", json=mkt_payload)
@@ -227,7 +227,7 @@ class APIFullIntegration(unittest.TestCase):
             side="BUY",
             order_type="MARKET",
             quantity=2,
-            party_id=5,
+            party_id="Adam",
             password=PWD
         )
         r = self.client.post("/orders", json=mkt_payload)
@@ -251,7 +251,7 @@ class APIFullIntegration(unittest.TestCase):
             order_type="GTC",
             price_cents=10200,
             quantity=1,
-            party_id=8,
+            party_id="Adam",
             password=PWD
         ))
         self.assertEqual(r1.status_code, 200)
@@ -263,7 +263,7 @@ class APIFullIntegration(unittest.TestCase):
             order_type="IOC",
             price_cents=9900,
             quantity=1,
-            party_id=9,
+            party_id="Adam",
             password=PWD
         )
         r2 = self.client.post("/orders", json=ioc_payload)
@@ -278,11 +278,11 @@ class APIFullIntegration(unittest.TestCase):
         # Do NOT create instrument 5 first → posting to /orders should 422
         bad_inputs = [
             # 1) missing price_cents on GTC
-            dict(instrument_id=5, side="BUY", order_type="GTC", quantity=1, party_id=1, password=PWD),
+            dict(instrument_id=5, side="BUY", order_type="GTC", quantity=1, party_id="Adam", password=PWD),
             # 2) invalid enum for side
-            dict(instrument_id=5, side="XXX", order_type="MARKET", quantity=1, party_id=1, password=PWD),
+            dict(instrument_id=5, side="XXX", order_type="MARKET", quantity=1, party_id="Adam", password=PWD),
             # 3) invalid enum for order_type
-            dict(instrument_id=5, side="BUY", order_type="FOO", quantity=1, party_id=1, password=PWD),
+            dict(instrument_id=5, side="BUY", order_type="FOO", quantity=1, party_id="Adam", password=PWD),
         ]
         for bad in bad_inputs:
             with self.subTest(bad=bad):
@@ -297,7 +297,7 @@ class APIFullIntegration(unittest.TestCase):
         # Place and cancel one order
         place = self.client.post("/orders", json=dict(
             instrument_id=6, side="SELL", order_type="GTC",
-            price_cents=9999, quantity=1, party_id=44, password=PWD
+            price_cents=9999, quantity=1, party_id="Adam", password=PWD
         ))
         self.assertEqual(place.status_code, 200)
         pj = place.json()
@@ -306,19 +306,19 @@ class APIFullIntegration(unittest.TestCase):
         oid = pj["order_id"]
 
         # 1st cancel → OK
-        r1 = self.client.post("/cancel", json={"instrument_id":6,"order_id":oid, "party_id":99, "password":PWD})
+        r1 = self.client.post("/cancel", json={"instrument_id":6,"order_id":oid, "party_id":"Adam", "password":PWD})
         self.assertEqual(r1.status_code, 200)
         j1 = r1.json()
         self.assertEqual(j1.get("status"), "CANCELLED")
 
         # 2nd cancel → ERROR (HTTP 200 but status="ERROR")
-        r2 = self.client.post("/cancel", json={"instrument_id":6,"order_id":oid, "party_id":99, "password":PWD})
+        r2 = self.client.post("/cancel", json={"instrument_id":6,"order_id":oid, "party_id":"Adam", "password":PWD})
         self.assertEqual(r2.status_code, 200)
         j2 = r2.json()
         self.assertEqual(j2.get("status"), "ERROR")
 
         # Wrong instrument → ERROR JSON
-        r3 = self.client.post("/cancel", json={"instrument_id":999,"order_id":1, "party_id":99, "password":PWD})
+        r3 = self.client.post("/cancel", json={"instrument_id":999,"order_id":1, "party_id":"Adam", "password":PWD})
         self.assertEqual(r3.status_code, 200)
         j3 = r3.json()
         self.assertEqual(j3.get("status"), "ERROR")
@@ -330,7 +330,7 @@ class APIFullIntegration(unittest.TestCase):
         for i in range(5):
             r = self.client.post("/orders", json=dict(
                 instrument_id=7, side="BUY",
-                order_type="GTC", price_cents=7000 + i, quantity=1, party_id=2, password=PWD
+                order_type="GTC", price_cents=7000 + i, quantity=1, party_id="Adam", password=PWD
             ))
             self.assertEqual(r.status_code, 200)
             j = r.json()
@@ -345,10 +345,10 @@ class APIFullIntegration(unittest.TestCase):
         self.writer._orders_by_instr[9] = [
             dict(order_type="GTC", side="SELL", price_cents=5000,
                  quantity=2, timestamp=time_ns(), order_id=101,
-                 party_id=3, cancelled=False, instrument_id=9, password=PWD),      # changed BUY→SELL
+                 party_id="Adam", cancelled=False, instrument_id=9, password=PWD),      # changed BUY→SELL
             dict(order_type="GTC", side="SELL", price_cents=5050,
                  quantity=3, timestamp=time_ns(), order_id=102,
-                 party_id=4, cancelled=False, instrument_id=9, password=PWD)       # changed BUY→SELL,
+                 party_id="Adam", cancelled=False, instrument_id=9, password=PWD)       # changed BUY→SELL,
         ]
         # Re‐create the Exchange so it rebuilds instrument 9
         from apps.exchange.exchange import Exchange
@@ -369,7 +369,7 @@ class APIFullIntegration(unittest.TestCase):
         # Place a MARKET order that sweeps both (2 + 3) and leaves remainder 5
         resp = test_client.post("/orders", json=dict(
             instrument_id=9, side="BUY", order_type="MARKET",
-            quantity=10, party_id=99, password=PWD
+            quantity=10, party_id="Adam", password=PWD
         ))
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -389,7 +389,7 @@ class APIFullIntegration(unittest.TestCase):
             qty = random.randint(1, 3)
             r = self.client.post("/orders", json=dict(
                 instrument_id=10, side=side, order_type="GTC",
-                price_cents=px, quantity=qty, party_id=random.randint(1, 5),
+                price_cents=px, quantity=qty, party_id="Adam",
                 password=PWD
             ))
             self.assertEqual(r.status_code, 200)
@@ -399,7 +399,7 @@ class APIFullIntegration(unittest.TestCase):
                 all_oids.append(oid)
             # 30 % chance to cancel immediately
             if oid is not None and random.random() < 0.3:
-                cancel_r = self.client.post("/cancel", json={"instrument_id": 10, "order_id": oid, "party_id":99, "password":PWD})
+                cancel_r = self.client.post("/cancel", json={"instrument_id": 10, "order_id": oid, "party_id":"Adam", "password":PWD})
                 self.assertEqual(cancel_r.status_code, 200)
 
         # Now send 50 random MARKET orders
@@ -407,7 +407,7 @@ class APIFullIntegration(unittest.TestCase):
             side = random.choice(["BUY", "SELL"])
             r = self.client.post("/orders", json=dict(
                 instrument_id=10, side=side, order_type="MARKET",
-                quantity=random.randint(1, 5), party_id=99,
+                quantity=random.randint(1, 5), party_id="Adam",
                 password=PWD
             ))
             # Always returns 200 and has a "remaining_qty" key

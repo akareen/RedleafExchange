@@ -83,17 +83,17 @@ class APIFullIntegration(unittest.TestCase):
         self.client.post("/new_book", json={"instrument_id": 1})
 
         ask = dict(instrument_id=1, side="SELL", order_type="GTC",
-                   price_cents=10500, quantity=5, party_id=1, password=PWD)
+                   price_cents=10500, quantity=5, party_id="Adam", password=PWD)
         ask_id = self.client.post("/orders", json=ask).json()["order_id"]
 
         bid = dict(instrument_id=1, side="BUY", order_type="GTC",
-                   price_cents=11000, quantity=3, party_id=2, password=PWD)
+                   price_cents=11000, quantity=3, party_id="Adam", password=PWD)
         trades = self.client.post("/orders", json=bid).json()["trades"]
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["quantity"], 3)
 
         cancel = dict(instrument_id=1, order_id=ask_id,
-                      party_id=99, password=PWD)
+                      party_id="Adam", password=PWD)
         self.assertEqual(self.client.post("/cancel", json=cancel).json()["status"], "CANCELLED")
 
     # ----- MARKET sweep multi-level ---------------------------------
@@ -102,10 +102,10 @@ class APIFullIntegration(unittest.TestCase):
         for px, qty in [(10000, 1), (10005, 2), (10010, 3)]:
             self.client.post("/orders", json=dict(
                 instrument_id=2, side="SELL", order_type="GTC",
-                price_cents=px, quantity=qty, party_id=9, password=PWD))
+                price_cents=px, quantity=qty, party_id="Adam", password=PWD))
 
         mkt = dict(instrument_id=2, side="BUY", order_type="MARKET",
-                   quantity=4, party_id=77, password=PWD)
+                   quantity=4, party_id="Adam", password=PWD)
         r = self.client.post("/orders", json=mkt).json()
         self.assertEqual(r["remaining_qty"], 0)
         self.assertEqual(sum(t["quantity"] for t in r["trades"]), 4)

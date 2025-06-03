@@ -27,7 +27,7 @@ def main():
             instrument_id      = INSTRUMENT_ID,
             instrument_name=INSTRUMENT_NAME,
             instrument_description=DESC,
-            admin_party_id     = 1,
+            admin_party_id     = "Adam",
             admin_password     = PASSWORD,
         )
     except ExchangeClientError:

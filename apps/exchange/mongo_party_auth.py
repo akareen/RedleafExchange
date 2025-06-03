@@ -23,7 +23,7 @@ def _build_auth_uri(db_name: str) -> str:
 
 
 class MongoPartyAuth:
-    _cache: dict[int, str] | None = None
+    _cache: dict[str, str] | None = None
 
     @classmethod
     async def _load(cls) -> None:
@@ -34,9 +34,9 @@ class MongoPartyAuth:
         client = AsyncIOMotorClient(uri)
         collection = client[SET.mongo_db]["parties"]
 
-        temp: dict[int, str] = {}
+        temp: dict[str, str] = {}
         async for doc in collection.find({}, {"_id": 0, "party_id": 1, "password": 1}):
-            pid = int(doc["party_id"])
+            pid = str(doc["party_id"])
             pwd_hash = doc.get("password", "")
             if isinstance(pwd_hash, bytes):
                 try:
@@ -122,7 +122,7 @@ class Auth:
     async def __call__(self, request: Request, payload: dict = Body(...)) -> dict:
         raw = payload.get("party_id")
         try:
-            pid = int(raw) if raw is not None else 0
+            pid = str(raw) if raw is not None else 0
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
