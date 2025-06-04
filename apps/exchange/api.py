@@ -143,3 +143,12 @@ def list_parties():
         coll.find({}, {"_id": 0, "party_id": 1, "party_name": 1})
            .sort("party_id", 1)
     )
+
+
+@app.get("/state/{instrument_id}")
+def get_state(instrument_id: int):
+    if instrument_id not in ex.books:
+        raise HTTPException(status_code=404, detail="instrument not found")
+
+    last_state = ex.books[instrument_id].last_state
+    return {"state": last_state}

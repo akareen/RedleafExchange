@@ -26,7 +26,7 @@ def fresh_order(
         quantity=qty,
         timestamp=time_ns(),
         order_id=OID,
-        party_id=random.randint(1, 9),
+        party_id="Adam",
         cancelled=False,
         filled_quantity=0,
         remaining_quantity=qty,

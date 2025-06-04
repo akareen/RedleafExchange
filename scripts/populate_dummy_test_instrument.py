@@ -17,7 +17,7 @@ from apps.trader.bot_trader.public_endpoints import (
 API = ExchangeClient(ExchangeClientConfig())
 
 INSTRUMENT_ID   = 1
-INSTRUMENT_NAME = "test_instrument_2"
+INSTRUMENT_NAME = "ExampleInstrument"
 DESC            = "A dummy book filled with GTC orders by party 1."
 PASSWORD        = ""
 
@@ -41,7 +41,7 @@ def main():
             order_type    = "GTC",
             price_cents   = px_mid - i * 5,
             quantity      = random.randint(1, 5),
-            party_id      = 1,
+            party_id      = "Adam",
             password      = PASSWORD,
         )
         API.place_order(
@@ -50,7 +50,7 @@ def main():
             order_type    = "GTC",
             price_cents   = px_mid + i * 5,
             quantity      = random.randint(1, 5),
-            party_id      = 1,
+            party_id      = "Adam",
             password      = PASSWORD,
         )
 
@@ -61,7 +61,7 @@ def main():
             side          = random.choice(["BUY", "SELL"]),
             order_type    = "MARKET",
             quantity      = random.randint(1, 3),
-            party_id      = 1,
+            party_id      = "Adam",
             password      = PASSWORD,
         )
         time.sleep(0.1)

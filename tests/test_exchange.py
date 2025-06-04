@@ -115,7 +115,7 @@ class APIFullIntegration(unittest.TestCase):
         self.client.post("/new_book", json={"instrument_id": 3})
         r = self.client.post("/orders", json=dict(
             instrument_id=3, side="BUY", order_type="MARKET",
-            quantity=2, party_id=5, password=PWD)).json()
+            quantity=2, party_id="Adam", password=PWD)).json()
         self.assertEqual(r["trades"], [])
         self.assertEqual(r["remaining_qty"], 2)
 
@@ -124,21 +124,21 @@ class APIFullIntegration(unittest.TestCase):
         self.client.post("/new_book", json={"instrument_id": 4})
         self.client.post("/orders", json=dict(
             instrument_id=4, side="SELL", order_type="GTC",
-            price_cents=10200, quantity=1, party_id=8, password=PWD))
+            price_cents=10200, quantity=1, party_id="Adam", password=PWD))
         r = self.client.post("/orders", json=dict(
             instrument_id=4, side="BUY", order_type="IOC",
-            price_cents=9900, quantity=1, party_id=9, password=PWD)).json()
+            price_cents=9900, quantity=1, party_id="Adam", password=PWD)).json()
         self.assertTrue(r["cancelled"] is True)
 
     # ----- Validation errors ----------------------------------------
     def test_validation_errors(self):
         bads = [
             dict(instrument_id=5, side="BUY", order_type="GTC", quantity=1,
-                 party_id=1, password=PWD),                         # price missing
+                 party_id="Adam", password=PWD),                         # price missing
             dict(instrument_id=5, side="XXX", order_type="MARKET", quantity=1,
-                 party_id=1, password=PWD),                         # bad side
+                 party_id="Adam", password=PWD),                         # bad side
             dict(instrument_id=5, side="BUY", order_type="FOO", quantity=1,
-                 party_id=1, password=PWD),                         # bad order_type
+                 party_id="Adam", password=PWD),                         # bad order_type
         ]
         for b in bads:
             with self.subTest(b=b):

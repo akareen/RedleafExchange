@@ -14,35 +14,37 @@ from apps.trader.click_trader.exchange_dash_app_utils import dollars, no_dollar,
 
 # ╭──────────────────────────────── CONFIG ─────────────────────────────╮
 API_URL      = os.getenv("API_URL", "http://localhost:8000")
-REFRESH_MS   = 1000               # UI refresh interval (ms)
+REFRESH_MS   = 500               # UI refresh interval (ms)
 MAX_TRADES   = 800                # Keep last N trades in memory
 
 # Heights:
-BOOK_H        = "50vh"            # Order Book
-PRICE_CH_H    = "40vh"            # Price Chart
-TRADES_H      = "50vh"            # Recent Trades
+BOOK_H        = "20vh"            # Order Book
+PRICE_CH_H    = "20vh"            # Price Chart
+TRADES_H      = "20vh"            # Recent Trades
 OPEN_INPUT_H  = "10vh"            # Open Orders (Me) input
-OPEN_TABLE_H  = "30vh"            # Open Orders (Me) table
-POS_H         = "50vh"            # Positions (Everyone)
+OPEN_TABLE_H  = "20vh"            # Open Orders (Me) table
+POS_H         = "20vh"            # Positions (Everyone)
 
 # Colors / fonts:
 BG            = "#1f2124"         # Soft dark‐gray background
 ORANGE_TXT    = "#fb8b1e"         # Bloomberg‐orange
+RED_TXT       = "#FF4D4D"         # Bloomberg‐orange
 WHITE_TXT     = "#FFFFFF"         # Pure white (instrument name, button text)
 LASTP_TXT     = "#00b050"         # Bright green (last price + numeric stats)
 BID_BAR       = "rgba(0,176,80,0.35)"   # Semi‐transparent green
 ASK_BAR       = "rgba(230,74,25,0.35)"  # Semi‐transparent red
 BID_FONT      = "#00b050"
 ASK_FONT      = "#e64a19"
-FONT_FAMILY   = "'IBM Plex Mono', monospace"
+FONT_FAMILY   = "'3270', 'IBM Plex Mono', monospace"
 CELL_FONT_SZ  = "0.75rem"         # Table cell font size
 INPUT_FONT_SZ = "0.9rem"          # Input / dropdown font size
 
 
-_instruments = requests.get(f"{API_URL}/instruments").json()
-if not _instruments:
+_raw = requests.get(f"{API_URL}/instruments").json()
+if not _raw:
     raise SystemExit("❌ No instruments found. Create at least one via API.")
 
+_instruments = sorted(_raw, key=lambda x: x["instrument_id"], reverse=True)
 _parties = {p["party_id"]: p["party_name"] for p in requests.get(f"{API_URL}/parties").json()}
 
 
@@ -52,6 +54,7 @@ dcc.TradeStore      = dcc.Store(id="store-trades")
 dcc.OrderIDsStore   = dcc.Store(id="store-order-ids")
 dcc.LastTradeStore  = dcc.Store(id="store-last-trade-ts")
 dcc.OpenStore       = dcc.Store(id="store-open-raw")
+dcc.StateStore      = dcc.Store(id="store-state")
 
 
 # ────────── Dash App Setup ─────────────────────────────────────────────
@@ -265,22 +268,33 @@ def compute_positions(trades):
     return rows
 
 
-def build_table(title, tbl_id, parent_min_height):
+def build_table(
+    title, tbl_id, parent_min_height,
+    data=None, columns=None, style_cond=None
+):
     HEADER_H = "2rem"
+    table_kwargs = {}
+    if data is not None:
+        table_kwargs["data"] = data
+    if columns is not None:
+        table_kwargs["columns"] = columns
+    if style_cond is not None:
+        table_kwargs["style_data_conditional"] = style_cond
+
     return dbc.Card(
         [
-            # CardHeader (title)
             dbc.CardHeader(
                 html.Span(title, style={"fontWeight": "900", "color": ORANGE_TXT}),
                 className="bg-dark text-light p-1",
                 style={"height": HEADER_H, "lineHeight": HEADER_H}
             ),
-            # Div to hold DataTable and let it flex‐fill
             html.Div(
                 dash_table.DataTable(
                     id=tbl_id,
                     page_action="none",
                     fixed_rows={"headers": True},
+                    # — Ensure *every* cell is dark by default:
+                    style_data={"backgroundColor": BG, "color": ORANGE_TXT},
                     style_header={
                         "backgroundColor": BG,
                         "color": ORANGE_TXT,
@@ -298,10 +312,11 @@ def build_table(title, tbl_id, parent_min_height):
                         "padding": "3px"
                     },
                     style_table={
+                        "backgroundColor": BG,
                         "minHeight": "100%",
                         "overflowY": "auto",
-                        "backgroundColor": BG,
                     },
+                    **table_kwargs,  # inject data/columns/style_data_conditional here
                 ),
                 style={"flex": "1 1 auto", "height": f"calc(100% - {HEADER_H})"}
             ),
@@ -474,9 +489,10 @@ app.layout = dbc.Container(
                 # Left: Order Book (50vh)
                 dbc.Col(
                     html.Div(
-                        build_table("Order Book (prices in dollars)", "tbl-book", BOOK_H),
+                        id="book-container",  # <-- placeholder
                         style={"minHeight": BOOK_H, "marginBottom": "0.5rem"}
-                    ), width=6
+                    ),
+                    width=6
                 ),
 
                 # Right: Price Chart (40vh)
@@ -574,14 +590,6 @@ app.layout = dbc.Container(
                                                     }
                                                 ), width=4
                                             ),
-                                            dbc.Col(
-                                                dbc.Button(
-                                                    "Fetch My Orders",
-                                                    id="btn-fetch-open",
-                                                    color="primary",
-                                                    style={"width": "100%", "whiteSpace": "nowrap"}
-                                                ), width=4
-                                            ),
                                         ],
                                         className="gy-1 px-2",
                                         style={"height": OPEN_INPUT_H}
@@ -633,6 +641,7 @@ app.layout = dbc.Container(
         dcc.OrderIDsStore,
         dcc.LastTradeStore,
         dcc.OpenStore,
+        dcc.Store(id="store-state"),
     ],
     fluid=True,
     className="pt-2",
@@ -646,48 +655,74 @@ app.layout = dbc.Container(
 #    • /trades/{inst_id}      → retrieve all trades & extract last timestamp
 #    Compare just order-IDs and last-trade-ts to decide if downstream updates fire.
 @app.callback(
-    Output("store-book", "data"),
-    Output("store-trades", "data"),
-    Output("store-order-ids", "data"),
-    Output("store-last-trade-ts", "data"),
-    Input("tick", "n_intervals"),
+    Output("store-book",         "data"),
+    Output("store-trades",       "data"),
+    Output("store-order-ids",    "data"),
+    Output("store-last-trade-ts","data"),
+    Output("store-open-raw",     "data"),     # << new
+    Input("tick",    "n_intervals"),
     Input("dd-instr", "value"),
+    State("o_party",         "value"),        # need Party ID
+    State("o_pwd",           "value"),        # need Password
     State("store-order-ids", "data"),
-    State("store-last-trade-ts", "data"),
+    State("store-last-trade-ts","data"),
 )
-def update_live_data(n_intervals, inst_id, old_order_ids, old_last_trade_ts):
-    # Fetch live orders
+def update_everything(n_intervals, inst_id, pid, pwd, old_ids, old_ts):
+    # 1) fetch live_orders to build order book
     try:
-        raw_live = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=2).json()
-    except Exception:
+        raw_live = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=1).json()
+    except:
         raw_live = []
     new_book = {"bid": defaultdict(int), "ask": defaultdict(int)}
     new_order_ids = []
     for r in raw_live:
+        px = int(r["price_cents"]); qty = int(r["remaining_quantity"])
         side_key = "bid" if r["side"] == "BUY" else "ask"
-        px = int(r["price_cents"])
-        qty = int(r["remaining_quantity"])
         new_book[side_key][px] += qty
         new_order_ids.append(r["order_id"])
     new_order_ids.sort()
 
-    # Fetch trades
+    # 2) fetch trades
     try:
-        raw_trades = requests.get(f"{API_URL}/trades/{inst_id}", timeout=2).json()
-    except Exception:
+        raw_trades = requests.get(f"{API_URL}/trades/{inst_id}", timeout=1).json()
+    except:
         raw_trades = []
     sorted_trades = sorted(raw_trades, key=lambda x: x["timestamp"])
     if len(sorted_trades) > MAX_TRADES:
         sorted_trades = sorted_trades[-MAX_TRADES:]
-    new_last_trade_ts = sorted_trades[-1]["timestamp"] if sorted_trades else None
+    new_last_ts = sorted_trades[-1]["timestamp"] if sorted_trades else None
 
-    # Compare only order‐IDs & last_trade_ts
-    if old_order_ids is not None and old_last_trade_ts is not None:
-        if old_order_ids == new_order_ids and old_last_trade_ts == new_last_trade_ts:
-            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    # 3) decide whether book/trades really changed
+    book_changed = not (old_ids is not None and old_ts is not None
+                       and old_ids == new_order_ids and old_ts == new_last_ts)
 
-    # Otherwise return all four Stores
-    return new_book, sorted_trades, new_order_ids, new_last_trade_ts
+    # 4) fetch “my open orders” (if we have a party ID/pwd)
+    my_open = []
+    msg = ""
+    if pid and pwd:
+        # Only request /live_orders again if the book changed,
+        # or if we want to update “open orders” every tick no matter what.
+        # For simplicity, we’ll just re-filter raw_live:
+        mine = [r for r in raw_live if str(r["party_id"]) == str(pid)]
+        my_open = [
+            {
+                "OID":   r["order_id"],
+                "Side":  r["side"],
+                "Price": no_dollar(int(r["price_cents"])),
+                "Qty":   int(r["remaining_quantity"]),
+            }
+            for r in sorted(mine, key=lambda x: x["order_id"])
+        ]
+    else:
+        msg = "Enter Party ID & Password below to see your open orders."
+
+    if not book_changed:
+        # If the book/trades didn’t change, don’t bounce the stores;
+        # we still want to push “my_open” every tick so it stays fresh.
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, my_open
+
+    # Otherwise return all five stores
+    return new_book, sorted_trades, new_order_ids, new_last_ts, my_open
 
 
 # 2) Render the top Banner (Instrument info + Last Price + Stats)
@@ -793,20 +828,43 @@ def render_banner(trades, book_data, inst_id):
     )
 
 
-# 3) Render Order Book
 @app.callback(
-    Output("tbl-book", "data"),
-    Output("tbl-book", "columns"),
-    Output("tbl-book", "style_data_conditional"),
-    Input("store-book", "data"),
+    Output("book-container", "children"),
+    Input("store-book", "data")
 )
-def render_book(book_data):
+def redraw_book_entirely(book_data):
+    """
+    Whenever `store-book.data` changes, build a fresh DataTable (inside
+    its Card container) and return it as the single child of book-container.
+    That forces Dash to unmount the old table and mount a brand-new one.
+    """
     if not book_data:
-        return [], [], []
+        # If there’s no data yet, return an “empty” table placeholder
+        return build_table("Order Book (prices in dollars)", "tbl-book", BOOK_H)
+
     bid_dict = book_data["bid"]
     ask_dict = book_data["ask"]
+
+    # Reproduce the same logic you had in book_to_rows(...) to get rows/cols/styles
     rows, cols, styles = book_to_rows(bid_dict, ask_dict)
-    return rows, cols, styles
+
+    # Now call build_table, but _inject_ our freshly computed rows/cols/styles_.
+    # We need a slight tweak: build_table currently only sets up the wrapper Card
+    # and DataTable with id="tbl-book", but takes no arguments for data/columns.
+    # So you will need to modify build_table to accept data/columns/style args.
+
+    # Suppose we change build_table signature to:
+    #   def build_table(title, tbl_id, parent_h, data=None, columns=None, style_cond=None):
+    # Then:
+    return build_table(
+        "Order Book (prices in dollars)",   # title
+        "tbl-book",                         # id
+        BOOK_H,                             # parent container height
+        data=rows,
+        columns=cols,
+        style_cond=styles
+    )
+
 
 
 # 4) Render Recent Trades & Price Chart
@@ -819,29 +877,39 @@ def render_book(book_data):
 def render_trades_and_chart(trades_data):
     rows = []
     xs, ys = [], []
+
     for t in reversed(trades_data or []):
         ts_str = format_dt(t["timestamp"])
         px    = int(t["price_cents"])
         qty   = int(t["quantity"])
         total = (px * qty) / 100  # in dollars
+
+        # Determine buyer/seller from maker_is_buyer
+        if t.get("maker_is_buyer", False):
+            buyer  = _parties.get(t["maker_party_id"], str(t["maker_party_id"]))
+            seller = _parties.get(t["taker_party_id"], str(t["taker_party_id"]))
+        else:
+            buyer  = _parties.get(t["taker_party_id"], str(t["taker_party_id"]))
+            seller = _parties.get(t["maker_party_id"], str(t["maker_party_id"]))
+
         rows.append({
-            "Time"  : ts_str,
-            "Price" : no_dollar(px),
-            "Qty"   : qty,
-            "Total" : f"{total:,.2f}",
-            "Maker" : _parties.get(t["maker_party_id"], str(t["maker_party_id"])),
-            "Taker" : _parties.get(t["taker_party_id"], str(t["taker_party_id"])),
+            "Time"   : ts_str,
+            "Price"  : no_dollar(px),
+            "Qty"    : qty,
+            "Total"  : f"{total:,.2f}",
+            "Buyer"  : buyer,
+            "Seller" : seller,
         })
         xs.append(datetime.datetime.fromtimestamp(t["timestamp"] / 1e9))
         ys.append(px / 100)
 
     trade_cols = [
-        {"name": "Time" , "id": "Time"},
-        {"name": "Price", "id": "Price"},
-        {"name": "Qty"  , "id": "Qty"},
-        {"name": "Total", "id": "Total"},
-        {"name": "Maker", "id": "Maker"},
-        {"name": "Taker", "id": "Taker"},
+        {"name": "Time"  , "id": "Time"},
+        {"name": "Price" , "id": "Price"},
+        {"name": "Qty"   , "id": "Qty"},
+        {"name": "Total" , "id": "Total"},
+        {"name": "Buyer" , "id": "Buyer"},
+        {"name": "Seller", "id": "Seller"},
     ]
 
     fig = go.Figure()
@@ -871,38 +939,27 @@ def render_trades_and_chart(trades_data):
     return rows, trade_cols, fig
 
 
-# 5) Fetch “Open Orders (Me)” on button click
-@app.callback(
-    Output("store-open-raw", "data"),
-    Output("lbl-msg", "children"),
-    Input("btn-fetch-open", "n_clicks"),
-    State("o_party", "value"),
-    State("o_pwd", "value"),
-    State("dd-instr", "value"),
-)
-def fetch_open_orders(nc, pid, pwd, inst_id):
-    if not nc:
-        return dash.no_update, dash.no_update
-    if pid is None or pwd is None:
-        return dash.no_update, "fetch_open_orders: ⚠ Enter Party ID & Password"
+
+# Helper function to re-fetch “my” open orders from the API:
+def _get_my_open_orders(pid, inst_id):
     try:
-        raw = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=3).json()
-    except Exception as e:
-        return dash.no_update, f"fetch_open_orders: Network Error: {e}"
-
+        raw = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=2).json()
+    except Exception:
+        raw = []
     mine = [r for r in raw if str(r["party_id"]) == str(pid)]
-    rows = []
-    for r in sorted(mine, key=lambda x: x["order_id"]):
-        rows.append({
-            "OID"   : r["order_id"],
-            "Side"  : r["side"],
-            "Price" : no_dollar(int(r["price_cents"])),
-            "Qty"   : int(r["remaining_quantity"]),
-        })
-    return rows, ""
+    rows = [
+        {
+            "OID":   r["order_id"],
+            "Side":  r["side"],
+            "Price": no_dollar(int(r["price_cents"])),
+            "Qty":   int(r["remaining_quantity"]),
+        }
+        for r in sorted(mine, key=lambda x: x["order_id"], reverse=True)
+    ]
+    return rows
 
 
-# 6) Render “Open Orders (Me)” table with Cancel buttons
+
 @app.callback(
     Output("open-orders-table", "children"),
     Input("store-open-raw", "data"),
@@ -950,8 +1007,6 @@ def render_open_table(open_rows):
     )
     return table
 
-
-# 7) Handle “Cancel” clicks in Open Orders (Me)
 @app.callback(
     Output("lbl-msg", "children", allow_duplicate=True),
     Input({"type": "cancel-open", "index": ALL}, "n_clicks"),
@@ -995,7 +1050,6 @@ def cancel_open(n_clicks_list, open_rows, pid, pwd, inst_id):
         return f"cancel_open: ❌ {detail}"
 
 
-# 8) Cancel All Open Orders for My Party
 @app.callback(
     Output("lbl-msg", "children", allow_duplicate=True),
     Input("btn-cancel-all", "n_clicks"),
@@ -1020,7 +1074,6 @@ def cancel_all(nc, pid, pwd, inst_id):
     return f"✓ All orders cancelled: {resp}"
 
 
-# 9) Send New Order (BUY or SELL)
 @app.callback(
     Output("lbl-msg", "children", allow_duplicate=True),
     Input("btn-buy", "n_clicks"),
@@ -1063,7 +1116,6 @@ def send_new_order(n_buy, n_sell, inst_id, pid, pwd, qty, price_txt, otype):
         return f"send_new_order: ❌ {detail}"
 
 
-# 10) Render Positions (Everyone)
 @app.callback(
     Output("tbl-pos", "data"),
     Output("tbl-pos", "columns"),
@@ -1084,4 +1136,4 @@ def render_positions(trades_data):
 
 # ────────── Run the Dash app ───────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("DASH_PORT", "8050")), debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("DASH_PORT", "8888")), debug=True)

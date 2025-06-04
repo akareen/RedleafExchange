@@ -16,7 +16,7 @@ from apps.exchange.settings import get_settings, admin_uri
 SET = get_settings()
 
 class _AuthMixin(BaseModel):
-    party_id: str  = Field(gt=0)
+    party_id: str  = Field()
     password: str  = Field(min_length=1)
 
 class NewOrderReq(_AuthMixin):
@@ -25,7 +25,7 @@ class NewOrderReq(_AuthMixin):
     order_type: OrderType | str
     price_cents: int | None = Field(None, ge=0)
     quantity: int = Field(gt=0)
-    party_id: str = Field(gt=0)
+    party_id: str = Field()
 
     @field_validator("side", mode="before")
     def _cast_side(cls, v):
@@ -67,7 +67,7 @@ class Exchange:
     def __init__(self, writer: CompositeWriter):
         self.log = logging.getLogger("Exchange")
         self._writer = writer
-        self._books: Dict[int, OrderBook] = {}
+        self.books: Dict[int, OrderBook] = {}
         self.log.info("Exchange starting — rebuilding books ...")
         self.log.info("Exchange rebuild complete — ready to serve")
         self._empty_hit = 0
@@ -93,7 +93,7 @@ class Exchange:
             self.log.warning("validation error: %s", e)
             return {"status": "ERROR", "details": e.errors()}
 
-        book = self._books.get(req.instrument_id)
+        book = self.books.get(req.instrument_id)
         if not book:
             self.log.warning("new-order unknown instrument %s", req.instrument_id)
             return {"status": "ERROR", "details": "unknown instrument"}
@@ -135,7 +135,7 @@ class Exchange:
         except ValidationError as e:
             return {"status": "ERROR", "details": e.errors()}
 
-        book = self._books.get(req.instrument_id)
+        book = self.books.get(req.instrument_id)
         if not book:
             self.log.warning("cancel unknown instrument %s", req.instrument_id)
             return {"status": "ERROR", "details": "unknown instrument"}
@@ -163,7 +163,7 @@ class Exchange:
             instrument_id = int(payload.get("instrument_id", 0))
         except ValueError:
             return {"status": "ERROR", "details": "invalid instrument_id"}
-        book = self._books.get(instrument_id)
+        book = self.books.get(instrument_id)
         if not book:
             return {"status": "ERROR", "details": "unknown instrument"}
 
@@ -189,13 +189,13 @@ class Exchange:
 
     # ───────────── management API  (callable from a POST /new_book) ───
     def create_order_book(self, instrument_id: int) -> dict:
-        if instrument_id in self._books:
+        if instrument_id in self.books:
             return {"status": "ERROR", "details": "instrument already exists"}
 
         self.log.info("CREATE-BOOK %s", instrument_id)
-        self._books[instrument_id] = OrderBook(instrument_id)
+        self.books[instrument_id] = OrderBook(instrument_id)
         self._writer.create_instrument(instrument_id)
-        self.log.info("CREATE-BOOK %s ok; total books=%d", instrument_id, len(self._books))
+        self.log.info("CREATE-BOOK %s ok; total books=%d", instrument_id, len(self.books))
         return {"status": "CREATED", "instrument_id": instrument_id}
 
     # ───────────── internal helpers ───────────────────────────────────
@@ -218,7 +218,7 @@ class Exchange:
     async def rebuild_from_database(self, writer: QueuedDbWriter) -> None:
         for instr in writer.list_instruments():
             book = OrderBook(instr)
-            self._books[instr] = book
+            self.books[instr] = book
             row_iter = writer.iter_orders(instr)
             self.log.info("REBUILD-START instrument=%s", instr)
 

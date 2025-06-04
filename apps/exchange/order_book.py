@@ -65,9 +65,11 @@ class OrderBook:
         self.ask_heap = PriceHeap(is_bid=False)
         self.oid_map: Dict[int, Order] = {}
         self.log.debug("OrderBook created")
+        self.last_state = 0
 
     # ---------- public ---------------------------------------------------
     def submit(self, order: Order) -> List[Trade]:
+        self.last_state += 1
         """
         • MARKET  →  execute immediately
         • GTC     →  match then rest
@@ -90,6 +92,7 @@ class OrderBook:
         return trades
 
     def cancel(self, order_id: int) -> bool:
+        self.last_state += 1
         """
         Idempotent cancel.
 
@@ -124,6 +127,7 @@ class OrderBook:
 
     # ---------- internal helpers ----------------------------------------
     def rest_order(self, o: Order) -> None:
+        self.last_state += 1
         lvl_dict = self.bids if o.side is Side.BUY else self.asks
         heap     = self.bid_heap if o.side is Side.BUY else self.ask_heap
 
