@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from pymongo import ReturnDocument
 from pymongo import MongoClient
 
-from apps.exchange.mongo_queued_db_writer import QueuedDbWriter
+from apps.exchange.mongo_db_writer import MongoDbWriter
 from apps.exchange.order_book   import OrderBook
 from apps.exchange.models import Order, Trade, Side, OrderType
 from apps.exchange.composite_writer import CompositeWriter
@@ -215,7 +215,7 @@ class Exchange:
         )
 
     # ───────────── cold-start rebuild logic ───────────────────────────
-    async def rebuild_from_database(self, writer: QueuedDbWriter) -> None:
+    async def rebuild_from_database(self, writer: MongoDbWriter) -> None:
         for instr in writer.list_instruments():
             book = OrderBook(instr)
             self.books[instr] = book

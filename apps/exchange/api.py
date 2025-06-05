@@ -7,7 +7,7 @@ from utils.logging import setup as setup_logging
 
 from apps.exchange.exchange import Exchange
 from apps.exchange.composite_writer import CompositeWriter
-from apps.exchange.mongo_queued_db_writer import QueuedDbWriter
+from apps.exchange.mongo_db_writer import MongoDbWriter
 from apps.exchange.multicast_writer import MulticastWriter
 from apps.exchange.text_backup_writer import TextBackupWriter
 from apps.exchange.mongo_party_auth import Auth
@@ -18,10 +18,10 @@ SET = get_settings()
 setup_logging()
 
 multicast_writer = MulticastWriter()
-queued_db_writer = QueuedDbWriter()
+db_writer = MongoDbWriter()
 text_backup = TextBackupWriter(directory="text_backup")
 writer = CompositeWriter(
-    queued_db_writer,
+    db_writer,
     multicast_writer,
     text_backup
 )
@@ -34,7 +34,7 @@ AuthAdmin = Auth(require_admin=True)
 
 @app.on_event("startup")
 async def load_exchange_state():
-    instruments_coll = queued_db_writer.sync_db["instruments"]
+    instruments_coll = db_writer.sync_db["instruments"]
     try:
         cursor = instruments_coll.find({}, {"instrument_id": 1})
     except Exception:
@@ -49,8 +49,8 @@ async def load_exchange_state():
         except Exception:
             pass
 
-    await ex.rebuild_from_database(queued_db_writer)
-    await queued_db_writer.startup()
+    await ex.rebuild_from_database(db_writer)
+    await db_writer.startup()
 
 
 @app.post("/orders")
@@ -88,7 +88,7 @@ async def new_book(
             "created_by": payload["party_id"],
         }
         try:
-            queued_db_writer.sync_db["instruments"].insert_one(meta)
+            db_writer.sync_db["instruments"].insert_one(meta)
         except DuplicateKeyError:
             pass
     return resp
@@ -96,16 +96,16 @@ async def new_book(
 
 @app.on_event("shutdown")
 async def unload_exchange_state():
-    await queued_db_writer.shutdown()
+    await db_writer.shutdown()
 
 
 def _coll_exists(name: str) -> bool:
-    return name in queued_db_writer.sync_db.list_collection_names()
+    return name in db_writer.sync_db.list_collection_names()
 
 
 @app.get("/instruments")
 def list_instruments():
-    coll = queued_db_writer.sync_db["instruments"]
+    coll = db_writer.sync_db["instruments"]
     return list(coll.find({}, {"_id": 0}).sort("created_time", 1))
 
 
@@ -114,7 +114,7 @@ def list_all_orders(instrument_id: int):
     coll_name = f"orders_{instrument_id}"
     if not _coll_exists(coll_name):
         raise HTTPException(status_code=404, detail="instrument not found")
-    coll = queued_db_writer.sync_db[coll_name]
+    coll = db_writer.sync_db[coll_name]
     return list(coll.find({}, {"_id": 0}).sort("order_id", 1))
 
 
@@ -123,7 +123,7 @@ def list_live_orders(instrument_id: int):
     coll_name = f"live_orders_{instrument_id}"
     if not _coll_exists(coll_name):
         raise HTTPException(status_code=404, detail="instrument not found")
-    coll = queued_db_writer.sync_db[coll_name]
+    coll = db_writer.sync_db[coll_name]
     return list(coll.find({}, {"_id": 0}).sort("order_id", 1))
 
 
@@ -132,23 +132,22 @@ def list_trades(instrument_id: int):
     coll_name = f"trades_{instrument_id}"
     if not _coll_exists(coll_name):
         raise HTTPException(status_code=404, detail="instrument not found")
-    coll = queued_db_writer.sync_db[coll_name]
+    coll = db_writer.sync_db[coll_name]
     return list(coll.find({}, {"_id": 0}).sort("timestamp", 1))
 
 
 @app.get("/parties")
 def list_parties():
-    coll = queued_db_writer.sync_db["parties"]
+    coll = db_writer.sync_db["parties"]
     return list(
         coll.find({}, {"_id": 0, "party_id": 1, "party_name": 1})
            .sort("party_id", 1)
     )
 
 
-@app.get("/state/{instrument_id}")
-def get_state(instrument_id: int):
-    if instrument_id not in ex.books:
-        raise HTTPException(status_code=404, detail="instrument not found")
-
-    last_state = ex.books[instrument_id].last_state
-    return {"state": last_state}
+@app.get("/action_count_seq")
+def action_count_seq():
+    doc = db_writer.sync_db["counters"].find_one({"_id": "action_count"})
+    if not doc:
+        raise HTTPException(status_code=404, detail="action_count counter not found")
+    return {"seq": doc["seq"]}

@@ -3,6 +3,7 @@ import os
 import json
 import datetime
 from collections import defaultdict
+from time import time
 
 import dash
 import dash_bootstrap_components as dbc
@@ -54,7 +55,7 @@ dcc.TradeStore      = dcc.Store(id="store-trades")
 dcc.OrderIDsStore   = dcc.Store(id="store-order-ids")
 dcc.LastTradeStore  = dcc.Store(id="store-last-trade-ts")
 dcc.OpenStore       = dcc.Store(id="store-open-raw")
-dcc.StateStore      = dcc.Store(id="store-state")
+dcc.StateStore      = dcc.Store(id="old-state")
 
 
 # ────────── Dash App Setup ─────────────────────────────────────────────
@@ -636,39 +637,67 @@ app.layout = dbc.Container(
 
         # ── Hidden Stores + Interval ───────────────────────────────────────
         dcc.Interval(id="tick", interval=REFRESH_MS),
+        html.Audio(
+            id="refresh-audio",
+            src="",            # start empty
+            autoPlay=True,     # play whenever `src` changes
+            style={"display": "none"},
+        ),
         dcc.BookStore,
         dcc.TradeStore,
         dcc.OrderIDsStore,
         dcc.LastTradeStore,
         dcc.OpenStore,
-        dcc.Store(id="store-state"),
+        dcc.Store(id="old-state", data=0),
+        dcc.Store(id="sound-played-ts", data=0),
     ],
     fluid=True,
     className="pt-2",
 )
 
+@app.callback(
+    Output("refresh-audio", "src"),
+    Output("sound-played-ts", "data"),
+    Input("store-book", "data"),
+    State("sound-played-ts", "data"),
+    prevent_initial_call=True
+)
+def play_sound_once_per_half_second(book_data, last_ts):
+    if book_data is None:
+        return dash.no_update, dash.no_update
+
+    now = time()
+    if now - last_ts < 0.5:  # less than half a second
+        return dash.no_update, last_ts
+
+    return f"/assets/get-out.mp3?v={int(now*1000)}", now
+
+
 
 # ─────────── Callbacks ──────────────────────────────────────────────────
-
-# 1) Every REFRESH_MS or when instrument changes, fetch from Mongo:
-#    • /live_orders/{inst_id} → rebuild book & extract sorted order_ids
-#    • /trades/{inst_id}      → retrieve all trades & extract last timestamp
-#    Compare just order-IDs and last-trade-ts to decide if downstream updates fire.
 @app.callback(
     Output("store-book",         "data"),
     Output("store-trades",       "data"),
     Output("store-order-ids",    "data"),
     Output("store-last-trade-ts","data"),
-    Output("store-open-raw",     "data"),     # << new
+    Output("store-open-raw",     "data"),
+    Output("old-state",         "data"),
     Input("tick",    "n_intervals"),
     Input("dd-instr", "value"),
-    State("o_party",         "value"),        # need Party ID
-    State("o_pwd",           "value"),        # need Password
-    State("store-order-ids", "data"),
-    State("store-last-trade-ts","data"),
+    State("old-state","data"),
+    State("o_party",         "value"),
+    State("o_pwd",           "value"),
 )
-def update_everything(n_intervals, inst_id, pid, pwd, old_ids, old_ts):
-    # 1) fetch live_orders to build order book
+def update_everything(n_intervals, inst_id, old_state, pid, pwd):
+    try:
+        resp = requests.get(f"{API_URL}/action_count_seq", timeout=1).json()
+        new_state = resp.get("seq")
+    except Exception:
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    if old_state is not None and int(new_state) == int(old_state):
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+    print(f"New state for {inst_id}: {new_state}, old state: {old_state}")
     try:
         raw_live = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=1).json()
     except:
@@ -682,7 +711,6 @@ def update_everything(n_intervals, inst_id, pid, pwd, old_ids, old_ts):
         new_order_ids.append(r["order_id"])
     new_order_ids.sort()
 
-    # 2) fetch trades
     try:
         raw_trades = requests.get(f"{API_URL}/trades/{inst_id}", timeout=1).json()
     except:
@@ -692,17 +720,9 @@ def update_everything(n_intervals, inst_id, pid, pwd, old_ids, old_ts):
         sorted_trades = sorted_trades[-MAX_TRADES:]
     new_last_ts = sorted_trades[-1]["timestamp"] if sorted_trades else None
 
-    # 3) decide whether book/trades really changed
-    book_changed = not (old_ids is not None and old_ts is not None
-                       and old_ids == new_order_ids and old_ts == new_last_ts)
-
-    # 4) fetch “my open orders” (if we have a party ID/pwd)
     my_open = []
     msg = ""
     if pid and pwd:
-        # Only request /live_orders again if the book changed,
-        # or if we want to update “open orders” every tick no matter what.
-        # For simplicity, we’ll just re-filter raw_live:
         mine = [r for r in raw_live if str(r["party_id"]) == str(pid)]
         my_open = [
             {
@@ -716,16 +736,9 @@ def update_everything(n_intervals, inst_id, pid, pwd, old_ids, old_ts):
     else:
         msg = "Enter Party ID & Password below to see your open orders."
 
-    if not book_changed:
-        # If the book/trades didn’t change, don’t bounce the stores;
-        # we still want to push “my_open” every tick so it stays fresh.
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, my_open
-
-    # Otherwise return all five stores
-    return new_book, sorted_trades, new_order_ids, new_last_ts, my_open
+    return new_book, sorted_trades, new_order_ids, new_last_ts, my_open, int(new_state)
 
 
-# 2) Render the top Banner (Instrument info + Last Price + Stats)
 @app.callback(
     Output("banner", "children"),
     Input("store-trades", "data"),
@@ -833,41 +846,24 @@ def render_banner(trades, book_data, inst_id):
     Input("store-book", "data")
 )
 def redraw_book_entirely(book_data):
-    """
-    Whenever `store-book.data` changes, build a fresh DataTable (inside
-    its Card container) and return it as the single child of book-container.
-    That forces Dash to unmount the old table and mount a brand-new one.
-    """
     if not book_data:
-        # If there’s no data yet, return an “empty” table placeholder
         return build_table("Order Book (prices in dollars)", "tbl-book", BOOK_H)
 
     bid_dict = book_data["bid"]
     ask_dict = book_data["ask"]
 
-    # Reproduce the same logic you had in book_to_rows(...) to get rows/cols/styles
     rows, cols, styles = book_to_rows(bid_dict, ask_dict)
 
-    # Now call build_table, but _inject_ our freshly computed rows/cols/styles_.
-    # We need a slight tweak: build_table currently only sets up the wrapper Card
-    # and DataTable with id="tbl-book", but takes no arguments for data/columns.
-    # So you will need to modify build_table to accept data/columns/style args.
-
-    # Suppose we change build_table signature to:
-    #   def build_table(title, tbl_id, parent_h, data=None, columns=None, style_cond=None):
-    # Then:
     return build_table(
-        "Order Book (prices in dollars)",   # title
-        "tbl-book",                         # id
-        BOOK_H,                             # parent container height
+        "Order Book (prices in dollars)",
+        "tbl-book",
+        BOOK_H,
         data=rows,
         columns=cols,
         style_cond=styles
     )
 
 
-
-# 4) Render Recent Trades & Price Chart
 @app.callback(
     Output("tbl-trades", "data"),
     Output("tbl-trades", "columns"),
@@ -882,9 +878,8 @@ def render_trades_and_chart(trades_data):
         ts_str = format_dt(t["timestamp"])
         px    = int(t["price_cents"])
         qty   = int(t["quantity"])
-        total = (px * qty) / 100  # in dollars
+        total = (px * qty) / 100
 
-        # Determine buyer/seller from maker_is_buyer
         if t.get("maker_is_buyer", False):
             buyer  = _parties.get(t["maker_party_id"], str(t["maker_party_id"]))
             seller = _parties.get(t["taker_party_id"], str(t["taker_party_id"]))
@@ -940,7 +935,6 @@ def render_trades_and_chart(trades_data):
 
 
 
-# Helper function to re-fetch “my” open orders from the API:
 def _get_my_open_orders(pid, inst_id):
     try:
         raw = requests.get(f"{API_URL}/live_orders/{inst_id}", timeout=2).json()
@@ -957,7 +951,6 @@ def _get_my_open_orders(pid, inst_id):
         for r in sorted(mine, key=lambda x: x["order_id"], reverse=True)
     ]
     return rows
-
 
 
 @app.callback(
@@ -1007,6 +1000,7 @@ def render_open_table(open_rows):
     )
     return table
 
+
 @app.callback(
     Output("lbl-msg", "children", allow_duplicate=True),
     Input({"type": "cancel-open", "index": ALL}, "n_clicks"),
@@ -1022,12 +1016,10 @@ def cancel_open(n_clicks_list, open_rows, pid, pwd, inst_id):
         return dash.no_update
     if not ctx:
         return dash.no_update
-        # Determine which “Cancel” button actually fired
     triggered = ctx[0]
     btn_id = json.loads(triggered["prop_id"].split(".")[0])
-    button_n = triggered["value"]  # n_clicks for that specific button
+    button_n = triggered["value"]
 
-    # If n_clicks is zero or None, this was not a real “click”
     if not button_n:
         return dash.no_update
     oid_clicked  = btn_id["index"]
@@ -1134,6 +1126,5 @@ def render_positions(trades_data):
     return rows, cols
 
 
-# ────────── Run the Dash app ───────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("DASH_PORT", "8888")), debug=True)
